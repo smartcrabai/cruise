@@ -171,6 +171,9 @@ pub struct SessionState {
     /// PR URL created after workflow completion.
     #[serde(default)]
     pub pr_url: Option<String>,
+    /// Manifest of workspace evidence copied into the session record on completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_manifest: Option<PathBuf>,
     /// Deliberate reason a completed worktree session has no PR.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_skipped_reason: Option<PrSkippedReason>,
@@ -372,6 +375,7 @@ impl SessionState {
             target_branch: None,
             allow_dirty_working_tree: false,
             pr_url: None,
+            evidence_manifest: None,
             pr_skipped_reason: None,
             pr_workflow_vars: None,
             forge: None,

@@ -52,6 +52,13 @@ pub async fn run(args: ListArgs) -> Result<()> {
             {
                 crate::display::print_bordered(&content, Some("plan.md"));
             }
+            if let Some(manifest) = &details.state.evidence_manifest {
+                eprintln!(
+                    "{} {}",
+                    list_text("cli.list.evidence", "Evidence:"),
+                    manifest.display()
+                );
+            }
             let mut actions = available_session_actions(&details.capabilities);
             if details.state.managed_child.is_some() {
                 eprintln!("Manager child (read-only). Use cruise manager for actions.");

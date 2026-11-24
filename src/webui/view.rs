@@ -203,6 +203,8 @@ pub(crate) struct TabInfoVm {
     pub(crate) completed_at: Option<String>,
     pub(crate) pr_url: Option<String>,
     pub(crate) pr_is_link: bool,
+    /// Manifest of workspace evidence saved in the session record.
+    pub(crate) evidence_manifest: Option<String>,
     pub(crate) phase_error: Option<String>,
     pub(crate) plan_error: Option<String>,
 }

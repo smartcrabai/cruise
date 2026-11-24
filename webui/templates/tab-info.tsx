@@ -42,6 +42,10 @@ export default function TabInfo(props) {
           {props.prUrl && !props.prIsLink && <span class="text-gray-800 dark:text-gray-200">{props.prUrl}</span>}
         </dd>
       </div>}
+      {props.evidenceManifest && <div>
+        <dt class="text-xs uppercase tracking-wide">{props.t.session.evidence}</dt>
+        <dd class="break-all font-mono text-gray-700 dark:text-gray-300 mt-0.5">{props.evidenceManifest}</dd>
+      </div>}
       {props.phaseError && <div>
         <dt class="text-xs uppercase tracking-wide">{props.t.session.error}</dt>
         <dd class="break-words text-red-600 dark:text-red-400 mt-0.5 font-mono text-xs">{props.phaseError}</dd>

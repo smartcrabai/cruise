@@ -4503,6 +4503,7 @@ impl CruiseApplication {
         state.completed_at = Some(crate::session::current_iso8601());
         state.clear_runner();
         state.current_step = None;
+        preserve_workspace_evidence(&self.manager, id, sink, &mut state, &ctx.path);
         match self.runtime.commit_if_active(claim, || {
             // Persist completion before destructive cleanup, then persist any cleared
             // workspace metadata while the same claim still owns the commit gate.
@@ -5951,6 +5952,39 @@ fn cancel_run(
     Err(CruiseError::Interrupted)
 }
 
+/// Copy untracked test evidence out of a worktree or clone before it can be removed.
+fn preserve_workspace_evidence(
+    manager: &SessionManager,
+    id: &str,
+    sink: &dyn ApplicationEventSink,
+    state: &mut SessionState,
+    workspace: &Path,
+) {
+    let artifacts = state.artifacts_path(&manager.sessions_dir());
+    let message = match crate::evidence::preserve(workspace, &artifacts) {
+        Ok(None) => return,
+        Ok(Some(preserved)) => {
+            let message = format!(
+                "Saved {} evidence file(s) ({} skipped); manifest: {}",
+                preserved.saved,
+                preserved.skipped,
+                preserved.manifest.display()
+            );
+            state.evidence_manifest = Some(preserved.manifest);
+            message
+        }
+        Err(error) => format!("warning: failed to save workspace evidence: {error}"),
+    };
+    crate::session::SessionLogger::new(manager.run_log_path(id))
+        .write(&format!("[info] {message}"));
+    let _ = sink.send(ApplicationEvent::LogChunk {
+        session_id: Some(id.to_string()),
+        stream: EventStream::Info,
+        text: message,
+        batch: false,
+    });
+}
+
 fn complete_run(
     manager: &SessionManager,
     runtime: &ApplicationRuntime,
@@ -5967,6 +6001,9 @@ fn complete_run(
         crate::workspace::ExecutionWorkspace::Worktree { ctx, .. } => Some(ctx),
         crate::workspace::ExecutionWorkspace::CurrentBranch { .. } => None,
     };
+    if let Some(ctx) = ctx {
+        preserve_workspace_evidence(manager, id, sink, &mut setup.state, &ctx.path);
+    }
     let committed = runtime.commit_if_active(claim, || {
         // A published PR must be durably recorded before its workspace is removed.
         manager.save(&setup.state)?;
@@ -6991,6 +7028,58 @@ mod tests {
             std::fs::read_to_string(after)
                 .unwrap_or_else(|error| panic!("read test output: {error}")),
             "true"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn completed_pr_cleanup_keeps_workspace_evidence_in_session_record() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("create temporary directory: {error}"));
+        let _home = crate::test_support::set_fake_home(temp.path());
+        let repo = application_reload_test_repo(&temp);
+        let (bin, _) = install_application_test_gh(&temp);
+        let _path = crate::test_support::prepend_to_path(&bin);
+        let id = "20261020000005";
+        let (app, manager, artifacts) = setup_application_no_pr_reload(&temp, &repo, id);
+        std::fs::write(
+            temp.path().join("workflow.yaml"),
+            "command: [cat]\ncreate_pr: true\ncleanup_after_pr: true\nsteps:\n  e2e:\n    command: \"printf 'test-results/\\\\n' > .gitignore; mkdir -p test-results/flow; printf png > test-results/flow/done.png; printf report > test-results/report.md\"\n",
+        )
+        .unwrap_or_else(|error| panic!("write workflow fixture: {error}"));
+        let sink: Arc<dyn ApplicationEventSink> = Arc::new(|_: ApplicationEvent| Ok(()));
+
+        let result = app
+            .run_with_log_sink(id, RunRequest::default(), sink, None)
+            .await
+            .unwrap_or_else(|error| panic!("run session: {error}"));
+
+        assert_eq!(result.phase, SessionPhase::Completed);
+        assert!(result.pr_url.is_some());
+        let saved = manager.load(id).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            saved.worktree_path, None,
+            "cleanup_after_pr removes the worktree"
+        );
+        assert!(!manager.worktrees_dir().join(id).exists());
+        let evidence = artifacts.join(crate::evidence::EVIDENCE_DIR);
+        assert_eq!(
+            std::fs::read_to_string(evidence.join("test-results/flow/done.png")).ok(),
+            Some("png".to_string())
+        );
+        assert_eq!(
+            std::fs::read_to_string(evidence.join("test-results/report.md")).ok(),
+            Some("report".to_string())
+        );
+        assert_eq!(
+            saved.evidence_manifest,
+            Some(artifacts.join(crate::evidence::MANIFEST))
+        );
+        assert!(
+            std::fs::read_to_string(manager.run_log_path(id))
+                .unwrap_or_else(|e| panic!("{e}"))
+                .contains("Saved 2 evidence file(s)")
         );
     }
 

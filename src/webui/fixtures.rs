@@ -353,6 +353,9 @@ fn tab_fixtures() -> Vec<(&'static str, Value)> {
                 completed_at: Some("2/3/26 05:05".to_string()),
                 pr_url: Some("https://example.com/pr/1".to_string()),
                 pr_is_link: true,
+                evidence_manifest: Some(
+                    "/data/cruise/sessions/s1/artifacts/evidence.md".to_string(),
+                ),
                 phase_error: Some("boom".to_string()),
                 plan_error: Some("plan boom".to_string()),
             }),
