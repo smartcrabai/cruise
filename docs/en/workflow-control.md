@@ -145,8 +145,12 @@ Not every no-change is a failure to route around -- sometimes the plan explicitl
 - **Output marker** -- a line in the step's raw output starting with `NO_CHANGES_INTENTIONAL: <reason>` (leading whitespace on the line is ignored). Works with `command:` mode and jcode prompts since it's plain text matching, no tool support required. The marker must anchor the start of a line -- a mid-line mention (quoted in passing, inside a code block, etc.) does not count.
 - **Structured SDK response** -- SDK-mode agents can declare intentional no-changes through a schema-validated structured response on prompt steps with an `if.no-file-changes` condition. In classic `command:` mode, use the output marker.
 
+Advisor steps ignore the `NO_CHANGES_INTENTIONAL:` marker and do not register the structured `skip_step` action. Any configured `if.no-file-changes` action still applies.
+
 <a id="failure-handling-iffail"></a>
 ### Failure handling (`if.fail`)
+
+For [advisor steps](sdk.md#advisor-steps), a detected workspace change, an unverifiable workspace, or a user interrupt always stops the run without following `if.fail`.
 
 `if.fail` decides what happens when a recoverable step failure occurs: a non-zero exit code from a command step without `accepted_exit_codes`, a recoverable prompt error (including LLM transport errors), a `timeout`, or a `no-file-changes: failed` trigger.
 With `accepted_exit_codes`, listed statuses continue normally; a missing or unlisted status or command runtime failure is fatal and bypasses `if.fail`.

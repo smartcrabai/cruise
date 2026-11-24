@@ -141,6 +141,7 @@ struct DefaultsFile {
     model: Option<ModelSpec>,
     subagent_model: Option<ModelEntry>,
     plan_model: Option<ModelSpec>,
+    advisor_model: Option<ModelSpec>,
     max_retries: Option<usize>,
     interactive_planning: Option<bool>,
     languages: Option<LanguagesConfig>,
@@ -189,6 +190,7 @@ pub struct WorkflowDefaults {
     model: Option<Sourced<ModelSpec>>,
     subagent_model: Option<Sourced<ModelEntry>>,
     plan_model: Option<Sourced<ModelSpec>>,
+    advisor_model: Option<Sourced<ModelSpec>>,
     max_retries: Option<usize>,
     interactive_planning: Option<bool>,
     languages: Option<LanguagesConfig>,
@@ -374,6 +376,7 @@ impl WorkflowDefaults {
         }
         self.model = sourced(file.model, path).or(self.model.take());
         self.plan_model = sourced(file.plan_model, path).or(self.plan_model.take());
+        self.advisor_model = sourced(file.advisor_model, path).or(self.advisor_model.take());
         self.max_retries = file.max_retries.or(self.max_retries);
         self.interactive_planning = file.interactive_planning.or(self.interactive_planning);
         if let Some(file_languages) = file.languages {
@@ -461,7 +464,7 @@ impl WorkflowDefaults {
             return Ok(());
         }
 
-        let conflicts: [(&str, Option<&Path>); 8] = [
+        let conflicts: [(&str, Option<&Path>); 9] = [
             (
                 "subagent_model",
                 self.subagent_model
@@ -481,6 +484,13 @@ impl WorkflowDefaults {
                 self.plan_model
                     .as_ref()
                     .filter(|_| config.plan_model.is_none())
+                    .map(|s| s.path.as_path()),
+            ),
+            (
+                "advisor_model",
+                self.advisor_model
+                    .as_ref()
+                    .filter(|_| workflow_backend != BackendClass::Command && config.advisor_model.is_none())
                     .map(|s| s.path.as_path()),
             ),
             (
@@ -559,6 +569,11 @@ impl WorkflowDefaults {
         }
         if config.plan_model.is_none() {
             config.plan_model = self.plan_model.as_ref().map(|s| s.value.clone());
+        }
+        if config.advisor_model.is_none()
+            && classify_backend(config.sdk.as_deref(), &config.command).0 != BackendClass::Command
+        {
+            config.advisor_model = self.advisor_model.as_ref().map(|s| s.value.clone());
         }
         if config.max_retries.is_none() {
             config.max_retries = self.max_retries;
@@ -1025,6 +1040,102 @@ mod tests {
     }
 
     // ---- apply_to ----
+
+    #[test]
+    fn advisor_model_defaults_follow_workflow_project_user_precedence() {
+        let env = env();
+        let steps = "steps:\n  inspect:\n    prompt: inspect\n";
+        let model = |yaml: &str| {
+            serde_json::to_value(applied_with_presence(&env, yaml))
+                .unwrap_or_else(|error| panic!("{error}"))["advisor_model"]
+                .clone()
+        };
+        write(&env.user_file, "advisor_model: openai/user\n");
+        assert_eq!(model(steps), "openai/user");
+
+        write(
+            &env.project_file,
+            "advisor_model: [openai/project, claude/backup]\n",
+        );
+        assert_eq!(
+            model(steps),
+            serde_json::json!(["openai/project", "claude/backup"])
+        );
+        assert_eq!(
+            model(&format!("advisor_model: openai/workflow\n{steps}")),
+            "openai/workflow"
+        );
+    }
+
+    #[test]
+    fn advisor_model_default_allows_explicit_command_backend() {
+        let env = env();
+        let schedule = "advisor_model: [{model: openai/a, disabled_during: ['mon-fri 01:00-04:00']}, claude/b]";
+        write(
+            &env.project_file,
+            &format!("sdk: jcode\n{schedule}\n"),
+        );
+        let defaults = WorkflowDefaults::load(Some(env.project.path()))
+            .unwrap_or_else(|error| panic!("{error}"));
+        let ordinary = "command: [echo]\nsteps:\n  inspect:\n    prompt: inspect\n";
+        let advisor = format!("flags:\n  advisor: {{}}\n{ordinary}  advise:\n    prompt: review\n    advisor: true\n    flag: advisor\n    output_file: advice.md\n");
+        let resolve = |yaml| {
+            let mut resolution = WorkflowConfigResolution::from_yaml(yaml)
+                .unwrap_or_else(|error| panic!("{error}"));
+            defaults.apply_to(&mut resolution).unwrap_or_else(|error| panic!("{error}"));
+            resolution.config
+        };
+        for yaml in [ordinary, &advisor] {
+            let config = resolve(yaml);
+            crate::config::validate_config(&config).unwrap_or_else(|error| panic!("{error}"));
+            let compiled = crate::workflow::compile(config)
+                .unwrap_or_else(|error| panic!("{error}"));
+            let graph = crate::graph::build_graph(&compiled, 3)
+                .unwrap_or_else(|error| panic!("{error}"));
+            let skips = crate::flags::preflight_skips(&compiled, &crate::flags::NO_FLAGS, &[]);
+            crate::graph::validation::validate_workflow(&compiled, &graph, &graph.start, &skips)
+                .unwrap_or_else(|error| panic!("{error}"));
+            if yaml == advisor {
+                let enabled = [("advisor".into(), true)].into_iter().collect();
+                let skips = crate::flags::preflight_skips(&compiled, &enabled, &["advise".into()]);
+                crate::graph::validation::validate_workflow(&compiled, &graph, &graph.start, &skips)
+                    .unwrap_or_else(|error| panic!("{error}"));
+                let skips = crate::flags::preflight_skips(&compiled, &enabled, &[]);
+                let error = crate::graph::validation::validate_workflow(&compiled, &graph, &graph.start, &skips)
+                    .err().unwrap_or_else(|| panic!("enabled advisor accepted command backend"));
+                assert!(error.to_string().contains("step 'advise' uses advisor, which requires the jcode backend"), "{error}");
+            }
+        }
+        let explicit = format!("{schedule}\n{ordinary}");
+        let error = crate::config::validate_config(&resolve(&explicit))
+            .expect_err("explicit advisor schedule accepted command backend");
+        assert!(error.to_string().contains("advisor_model") && error.to_string().contains("disabled_during"), "{error}");
+    }
+
+    #[test]
+    fn advisor_model_environment_overrides_workflow_unless_blank() {
+        let env = env();
+        write(&env.project_file, "advisor_model: openai/project\n");
+        for (raw, expected) in [
+            (" openai/env ", serde_json::json!("openai/env")),
+            (
+                r#"["openai/env", "claude/backup"]"#,
+                serde_json::json!(["openai/env", "claude/backup"]),
+            ),
+            (" \n\t ", serde_json::json!("openai/workflow")),
+        ] {
+            let _var = EnvGuard::set("CRUISE_ADVISOR_MODEL", raw);
+            let mut config = applied_with_presence(
+                &env,
+                "advisor_model: openai/workflow\nsteps:\n  inspect:\n    prompt: inspect\n",
+            );
+            config
+                .apply_env_overrides()
+                .unwrap_or_else(|error| panic!("{error}"));
+            let value = serde_json::to_value(config).unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(value["advisor_model"], expected, "{raw:?}");
+        }
+    }
 
     #[test]
     fn defaults_fill_unset_model_but_workflow_wins() {

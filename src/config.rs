@@ -211,6 +211,10 @@ pub struct WorkflowConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_model: Option<ModelSpec>,
 
+    /// Model for advisor prompts, falling back to `plan_model` and `model`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advisor_model: Option<ModelSpec>,
+
     /// Global budgeted graph-transition ceiling; CLI `--max-retries` overrides;
     /// defaults to [`DEFAULT_MAX_RETRIES`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -531,6 +535,10 @@ pub struct StepConfig {
     /// Defaults to `false`; false values are omitted when serialized.
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_commit: bool,
+
+    /// Run this top-level prompt as a read-only advisor.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub advisor: bool,
 
     /// Per-prompt override for the workflow-level computer-use setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1029,7 +1037,11 @@ impl WorkflowConfig {
     /// fallback. Implicit candidates stay attached to their originating request
     /// instead of leaking into a model-name-keyed shared map.
     fn resolve_model_fallbacks(&mut self) {
-        let model_specs = [self.model.as_ref(), self.plan_model.as_ref()];
+        let model_specs = [
+            self.model.as_ref(),
+            self.plan_model.as_ref(),
+            self.advisor_model.as_ref(),
+        ];
         if !model_specs.iter().any(|spec| {
             spec.as_ref()
                 .is_some_and(|spec| matches!(spec, ModelSpec::Multiple(models) if models.len() > 1))
@@ -1538,7 +1550,73 @@ pub(crate) fn validate_quality_gates(config: &WorkflowConfig) -> crate::error::R
     Ok(())
 }
 
+pub(crate) const ADVISOR_PLACEMENT_SUFFIX: &str =
+    " advisor is only supported on ordinary prompts under top-level steps";
+
+fn advisor_placement_error(name: &str) -> crate::error::CruiseError {
+    crate::error::CruiseError::InvalidStepConfig(format!("step '{name}'{ADVISOR_PLACEMENT_SUFFIX}"))
+}
+
+/// Advisors must be ordinary top-level prompt steps, before group expansion.
+pub(crate) fn validate_advisor(config: &WorkflowConfig) -> crate::error::Result<()> {
+    fn check(name: &str, step: &StepConfig, top_level: bool) -> crate::error::Result<()> {
+        use crate::error::CruiseError;
+        let invalid = |reason: &str| {
+            CruiseError::InvalidStepConfig(format!("step '{name}' advisor {reason}"))
+        };
+        if step.advisor {
+            if !top_level
+                || (step.prompt.is_none() && step.prompt_file.is_none())
+                || step.command.is_some()
+                || step.option.is_some()
+                || step.parallel.is_some()
+                || step.group.is_some()
+                || step.workflow_call.is_some()
+                || step.squash_merge.is_some()
+                || step.github_review.is_some()
+            {
+                return Err(advisor_placement_error(name));
+            }
+            if step
+                .output_file
+                .as_deref()
+                .is_none_or(|path| path.trim().is_empty())
+            {
+                return Err(invalid("requires output_file"));
+            }
+            if step.allow_commit {
+                return Err(invalid("cannot use allow_commit: true"));
+            }
+            if step
+                .permission
+                .is_some_and(|mode| mode != PermissionMode::ReadOnly)
+            {
+                return Err(invalid("requires read-only permission"));
+            }
+        }
+        if let Some(children) = &step.parallel {
+            for (child_name, child) in children {
+                check(&format!("{name}/{child_name}"), child, false)?;
+            }
+        }
+        Ok(())
+    }
+
+    for (name, step) in &config.steps {
+        check(name, step, true)?;
+    }
+    for (name, step) in config
+        .after_pr
+        .iter()
+        .chain(config.groups.values().flat_map(|group| &group.steps))
+    {
+        check(name, step, false)?;
+    }
+    Ok(())
+}
+
 const CONFIG_CHECKS: &[fn(&WorkflowConfig) -> crate::error::Result<()>] = &[
+    validate_advisor,
     validate_accepted_exit_codes,
     validate_require_bubblewrap,
     validate_sdk,
@@ -1906,6 +1984,9 @@ pub(crate) fn validate_squash_merge_step(
     let invalid = |detail: &str| {
         CruiseError::InvalidStepConfig(format!("step '{name}' squash-merge: {detail}"))
     };
+    if step.advisor {
+        return Err(advisor_placement_error(name));
+    }
     if step.squash_merge != Some(true) {
         return Err(invalid("must be set to true"));
     }
@@ -1977,6 +2058,12 @@ pub(crate) fn validate_parallel_step(name: &str, step: &StepConfig) -> crate::er
     let Some(children) = &step.parallel else {
         return Ok(());
     };
+    if step.advisor {
+        return Err(advisor_placement_error(name));
+    }
+    if let Some((child, _)) = children.iter().find(|(_, child)| child.advisor) {
+        return Err(advisor_placement_error(&format!("{name}/{child}")));
+    }
     if step.quality_gates.is_some() || children.values().any(|child| child.quality_gates.is_some())
     {
         return Err(CruiseError::InvalidStepConfig(format!(
@@ -2187,6 +2274,7 @@ pub fn validate_sdk(config: &WorkflowConfig) -> crate::error::Result<()> {
     for (field, spec) in [
         ("model", config.model.as_ref()),
         ("plan_model", config.plan_model.as_ref()),
+        ("advisor_model", config.advisor_model.as_ref()),
     ] {
         if let Some(spec) = spec {
             spec.validate(field)?;
@@ -2276,17 +2364,31 @@ pub(crate) fn planning_model_candidates(
 /// Collect execution models from the workflow and every nested step.
 pub(crate) fn execution_model_candidates(
     config: &WorkflowConfig,
+    flags: &crate::flags::FlagValues,
+    skipped_steps: &[String],
 ) -> crate::model_selection::ModelCandidates {
-    use crate::model_selection::{ModelCandidates, Sdk, resolve_candidates, select_step_model};
+    use crate::model_selection::{
+        ModelCandidates, Sdk, advisor_spec, resolve_candidates, select_step_model,
+    };
     fn collect_step(
         config: &WorkflowConfig,
         step: &StepConfig,
         sdk: Sdk,
         candidates: &mut ModelCandidates,
     ) {
+        let spec = if step.advisor {
+            advisor_spec(
+                config.advisor_model.as_ref(),
+                config.plan_model.as_ref(),
+                config.model.as_ref(),
+            )
+        } else {
+            config.model.as_ref()
+        };
+        let models = select_step_model(spec, step.model.as_deref(), sdk);
         candidates.extend(crate::retry::effective_candidates(
             config.retry.as_ref(),
-            &select_step_model(config.model.as_ref(), step.model.as_deref(), sdk),
+            &models,
             sdk,
         ));
         if let Some(children) = &step.parallel {
@@ -2302,7 +2404,12 @@ pub(crate) fn execution_model_candidates(
         &resolve_candidates(config.model.as_ref(), sdk),
         sdk,
     );
-    for step in config.steps.values().chain(config.after_pr.values()).chain(
+    for step in config.steps.iter().filter_map(|(name, step)| {
+        (!(step.advisor
+            && (crate::flags::is_disabled(step.flag.as_ref(), flags)
+                || skipped_steps.iter().any(|skip| skip == name))))
+        .then_some(step)
+    }).chain(config.after_pr.values()).chain(
         config
             .groups
             .values()
@@ -2380,6 +2487,10 @@ fn validate_permission(config: &WorkflowConfig) -> crate::error::Result<()> {
     let effective = |step: &StepConfig| step.permission.unwrap_or_else(|| config.permission());
     let is_prompt = |step: &StepConfig| step.prompt.is_some() || step.prompt_file.is_some();
     let check_prompt = |name: &str, step: &StepConfig| -> crate::error::Result<()> {
+        // Advisor policy is validated separately, including the skip-aware backend gate.
+        if step.advisor {
+            return Ok(());
+        }
         let mode = effective(step);
         if mode == PermissionMode::Full {
             return Ok(());
@@ -2638,6 +2749,9 @@ fn validate_step_groups(
 
     for (step_name, step) in steps {
         if let Some(group_name) = step.group.as_deref() {
+            if step.advisor {
+                return Err(advisor_placement_error(step_name));
+            }
             if !groups.contains_key(group_name) {
                 return Err(CruiseError::InvalidStepConfig(format!(
                     "step '{step_name}' references undefined group '{group_name}'"
@@ -2911,6 +3025,225 @@ fn unreachable_group_message_external_target(
 mod tests {
     use super::*;
     use crate::test_support::{EnvGuard, err_string, lock_process, mixed_conditional_cycle_config};
+
+    #[test]
+    fn advisor_config_round_trips_and_omits_defaults() {
+        use serde_json::json;
+
+        for (model, expected) in [
+            ("openai/a", json!("openai/a")),
+            ("[openai/a, claude/b]", json!(["openai/a", "claude/b"])),
+        ] {
+            let config = WorkflowConfig::from_yaml(&format!(
+                "advisor_model: {model}\nsteps:\n  inspect:\n    prompt: inspect\n    advisor: true\n    output_file: advice.md\n  disabled:\n    prompt: inspect\n    advisor: false\n  absent:\n    prompt: inspect\n"
+            ))
+            .unwrap_or_else(|error| panic!("{error}"));
+            let yaml = serde_yaml::to_string(&config).unwrap_or_else(|error| panic!("{error}"));
+            let reparsed =
+                WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|error| panic!("{error}"));
+            let value = serde_json::to_value(reparsed).unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(value["advisor_model"], expected);
+            assert_eq!(value["steps"]["inspect"]["advisor"], true);
+            assert!(value["steps"]["disabled"].get("advisor").is_none());
+            assert!(value["steps"]["absent"].get("advisor").is_none());
+        }
+        let config =
+            WorkflowConfig::from_yaml("steps: {}\n").unwrap_or_else(|error| panic!("{error}"));
+        let value = serde_json::to_value(config).unwrap_or_else(|error| panic!("{error}"));
+        assert!(value.get("advisor_model").is_none());
+
+        let error = WorkflowConfig::from_yaml(
+            "steps:\n  inspect:\n    prompt: inspect\n    advisor: true\n    advisor_typo: true\n    output_file: advice.md\n",
+        )
+        .expect_err("unknown step property must still fail");
+        assert!(error.to_string().contains("advisor_typo"), "{error}");
+    }
+
+    #[test]
+    fn advisor_model_uses_planning_model_validation_rules() {
+        let step = "steps:\n  inspect:\n    prompt: inspect\n    advisor: true\n    output_file: advice.md\n";
+        let schedule = "advisor_model: [{model: openai/a, disabled_during: ['mon-fri 01:00-04:00']}, claude/b]";
+        let valid = WorkflowConfig::from_yaml(&format!("{schedule}\n{step}"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        validate_config(&valid).unwrap_or_else(|error| panic!("{error}"));
+        for (yaml, reason) in [
+            (
+                format!("advisor_model: [{{sdk: jcode, model: openai/a}}]\n{step}"),
+                "SDK-qualified",
+            ),
+            (
+                format!("command: [echo]\n{schedule}\n{step}"),
+                "disabled_during",
+            ),
+        ] {
+            let error = match WorkflowConfig::from_yaml(&yaml) {
+                Ok(config) => err_string(validate_config(&config)),
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                error.contains("advisor_model") && error.contains(reason),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn advisor_rejects_reserved_placements_and_unsafe_prompt_settings() {
+        for yaml in [
+            "steps:\n  target:\n    command: 'true'\n    advisor: true\n",
+            "steps:\n  target:\n    option: [{selector: done, next: end}]\n    advisor: true\n  end: {command: 'true'}\n",
+            "steps:\n  target:\n    parallel: {child: {prompt: inspect}}\n    advisor: true\n",
+            "steps:\n  fan:\n    parallel:\n      target: {prompt: inspect, advisor: true, output_file: advice.md}\n",
+            "groups:\n  g:\n    steps:\n      child: {prompt: inspect}\nsteps:\n  target: {group: g, advisor: true}\n",
+            "groups:\n  g:\n    steps:\n      target: {prompt: inspect, advisor: true, output_file: advice.md}\nsteps:\n  call: {group: g}\n",
+            "steps:\n  main: {prompt: implement}\nafter-pr:\n  target: {prompt: inspect, advisor: true, output_file: advice.md}\n",
+            "flags:\n  merge: {}\nsteps:\n  main: {prompt: implement}\nafter-pr:\n  target: {squash-merge: true, flag: merge, advisor: true}\n",
+            "steps:\n  main: {prompt: implement}\nafter-pr:\n  target:\n    github-review: {bots: ['coderabbitai[bot]']}\n    prompt: inspect\n    timeout: 30m\n    advisor: true\n    output_file: advice.md\n",
+            "steps:\n  target: {prompt: inspect, advisor: true}\n",
+            "steps:\n  target: {prompt: inspect, advisor: true, output_file: advice.md, allow_commit: true}\n",
+            "steps:\n  target: {prompt: inspect, advisor: true, output_file: advice.md, permission: edit}\n",
+            "steps:\n  target: {prompt: inspect, advisor: true, output_file: advice.md, permission: full}\n",
+        ] {
+            let config =
+                WorkflowConfig::from_yaml(yaml).unwrap_or_else(|error| panic!("{yaml}\n{error}"));
+            match validate_config(&config) {
+                Err(crate::error::CruiseError::InvalidStepConfig(message)) => {
+                    assert!(
+                        message.contains("target") && message.contains("advisor"),
+                        "{yaml}\n{message}"
+                    );
+                }
+                other => panic!("{yaml}\nexpected InvalidStepConfig, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn advisor_is_allowed_in_inlined_steps_but_not_on_workflow_call_sites() {
+        use crate::workflow_call::resolve_workflow_calls_without_app_defaults;
+        use crate::workflow_defaults::WorkflowDefaults;
+
+        let _lock = lock_process();
+        let _guards = crate::test_support::clear_config_override_envs();
+        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        std::fs::write(
+            dir.path().join("callee.yaml"),
+            "steps:\n  inspect: {prompt: inspect, advisor: true, output_file: advice.md}\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let resolve = |attributes| {
+            let config = WorkflowConfig::from_yaml(&format!(
+                "steps:\n  target:\n    workflow_call: ./callee.yaml\n    {attributes}\n"
+            ))
+            .unwrap_or_else(|error| panic!("{error}"));
+            resolve_workflow_calls_without_app_defaults(
+                config,
+                dir.path(),
+                &WorkflowDefaults::default(),
+            )
+        };
+
+        let resolved = resolve("").unwrap_or_else(|error| panic!("{error}"));
+        validate_config(&resolved).unwrap_or_else(|error| panic!("{error}"));
+        let value = serde_json::to_value(resolved).unwrap_or_else(|error| panic!("{error}"));
+        assert!(value["steps"].as_object().is_some_and(|steps| {
+            steps
+                .values()
+                .any(|step| step["advisor"] == true && step["output_file"] == "advice.md")
+        }));
+
+        match resolve("advisor: true") {
+            Err(crate::error::CruiseError::InvalidStepConfig(message)) => {
+                assert!(
+                    message.contains("target") && message.contains("advisor"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected InvalidStepConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn advisor_static_validation_accepts_top_level_command_backend_prompts() {
+        for (prompt, flags, extra) in [
+            ("prompt: inspect", "", ""),
+            (
+                "prompt_file: inspect.md",
+                "flags:\n  review: {}\n",
+                "flag: review\n    permission: read-only",
+            ),
+        ] {
+            let config = WorkflowConfig::from_yaml(&format!(
+                "command: [echo]\n{flags}steps:\n  inspect:\n    {prompt}\n    advisor: true\n    output_file: advice.md\n    {extra}\n"
+            ))
+            .unwrap_or_else(|error| panic!("{error}"));
+            validate_config(&config).unwrap_or_else(|error| panic!("{error}"));
+        }
+    }
+
+    #[test]
+    fn advisor_execution_candidates_follow_model_cascade_without_changing_ordinary_steps() {
+        for (roles, advisor, step_model, selected) in [
+            (
+                "advisor_model: openai/advice\nplan_model: openai/plan",
+                true,
+                "model: openai/step",
+                vec!["openai/step"],
+            ),
+            (
+                "advisor_model: [openai/advice, claude/backup]\nplan_model: openai/plan",
+                true,
+                "model: openai/advice",
+                vec!["openai/advice", "claude/backup"],
+            ),
+            (
+                "advisor_model: openai/advice\nplan_model: openai/plan",
+                true,
+                "",
+                vec!["openai/advice"],
+            ),
+            (
+                "advisor_model: openai/advice\nplan_model: openai/plan",
+                false,
+                "",
+                vec!["openai/global"],
+            ),
+            ("plan_model: openai/plan", true, "", vec!["openai/plan"]),
+            (
+                "advisor_model: []\nplan_model: openai/plan",
+                true,
+                "",
+                vec!["openai/plan"],
+            ),
+            (
+                "advisor_model: []\nplan_model: []",
+                true,
+                "",
+                vec!["openai/global"],
+            ),
+            ("", true, "", vec!["openai/global"]),
+        ] {
+            let config = WorkflowConfig::from_yaml(&format!(
+                "model: openai/global\n{roles}\nsteps:\n  inspect:\n    prompt: inspect\n    output_file: advice.md\n    advisor: {advisor}\n    {step_model}\n  ordinary:\n    prompt: implement\n"
+            ))
+            .unwrap_or_else(|error| panic!("{error}"));
+            let actual = execution_model_candidates(&config, &crate::flags::NO_FLAGS, &[]);
+            let actual: Vec<_> = actual
+                .iter()
+                .map(|candidate| candidate.model.as_deref())
+                .collect();
+            let expected: Vec<_> = ["openai/global"]
+                .into_iter()
+                .chain(selected)
+                .chain(["openai/global"])
+                .map(Some)
+                .collect();
+            assert_eq!(
+                actual, expected,
+                "{roles}\nadvisor: {advisor}\n{step_model}"
+            );
+        }
+    }
 
     const SAMPLE_YAML: &str = r#"
 command:
@@ -7279,7 +7612,7 @@ groups:
         )
         .unwrap_or_else(|error| panic!("{error:?}"));
         assert_candidate_values(
-            execution_model_candidates(&config),
+            execution_model_candidates(&config, &crate::flags::NO_FLAGS, &[]),
             &[
                 (Sdk::Jcode, Some("openai/base")),
                 (Sdk::Jcode, Some("openai/direct")),
@@ -7303,7 +7636,7 @@ groups:
             "sdk: jcode\nmodel: [openai/main, claude/sonnet]\nretry:\n  model_fallback: false\nsteps:\n  run:\n    prompt: hi\n    model: openai/main:high\n",
         ).unwrap_or_else(|error| panic!("{error:?}"));
         assert_candidate_values(
-            execution_model_candidates(&config),
+            execution_model_candidates(&config, &crate::flags::NO_FLAGS, &[]),
             &[
                 (Sdk::Jcode, Some("openai/main")),
                 (Sdk::Jcode, Some("openai/main:high")),
@@ -7339,7 +7672,7 @@ steps:
             ],
         );
         assert_candidate_values(
-            execution_model_candidates(&config),
+            execution_model_candidates(&config, &crate::flags::NO_FLAGS, &[]),
             &[
                 (Sdk::Jcode, Some("openai/run")),
                 (Sdk::Jcode, Some("claude/run-fallback")),

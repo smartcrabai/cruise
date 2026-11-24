@@ -53,6 +53,19 @@ steps:
 
 jcode の subagent model は有効な空でない model に解決される必要があります。
 
+<a id="advisor-steps"></a>
+### アドバイザーステップ
+
+`advisor: true` は `steps` 直下の通常の prompt step（`workflow_call` でそこに展開されたステップを含む）に指定できます。`output_file` が必須で、`allow_commit: true` は指定できません。ワークフローの既定値に関係なく[読み取り専用](#permission-modes)になります。ステップの `permission` は省略するか `read-only` にしてください。
+
+モデルはステップの `model` → `advisor_model` → `plan_model` → ワークフローの `model` の順で選択します。空のロール配列は未設定として扱います。`advisor_model` は `plan_model` と同様、モデル文字列または `disabled_during` を含められるフォールバック配列を指定できます。ワークフローやユーザー／プロジェクトの `default.yaml` に設定し、`CRUISE_ADVISOR_MODEL`（文字列または JSON 配列）で上書きできます。`cruise config` の設定項目ではなく、他の prompt には影響しません。
+
+有効なアドバイザーには jcode が必要です。実行前の検証（dry run を含む）では、フラグで無効化されたアドバイザーと、ユーザーが明示的にスキップしたアドバイザーをこの確認から除外します。`cruise workflow doctor` が適用するのはフラグによるスキップのみです。アドバイザーは `cruise tell` で保留中の指示を消費しません。
+
+実行前に Cruise はセッションの成果物 `<output_file>.diff` を生成します。`{file:<output_file>.diff}` で読み込めます。内容は統計に続く `HEAD` からの未コミット差分です。無視されていない未追跡ファイルを含み、`.worktreeinclude` に記載されたパスは除外します。256 KiB を超える場合は行の境界で切り詰め、その旨を追記します。試行前やスキップ時には古い助言を削除し、成功した場合だけ新しい助言を保存します。助言がないのに `{file:<output_file>}` で読み込むとエラーになります。
+
+差分取得失敗、バックエンドエラー、タイムアウトなどの通常の失敗は `if.fail` で処理できます。作業領域の変更を検出した場合、検証できない場合、またはユーザーが中断した場合は、`if.fail` に関係なく実行を停止します。助言と差分は信頼できない参照データであり、指示や制御フロー、承認の入力には使いません。
+
 <a id="sdk-jcode--the-jcode-sdk-default"></a>
 ### `sdk: jcode` — jcode SDK（既定）
 

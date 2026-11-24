@@ -940,6 +940,7 @@ fn validate_call_site(step_name: &str, step: &StepConfig) -> Result<()> {
         ("env", !step.env.is_empty()),
         ("allow_commit", step.allow_commit),
         ("computer_use", step.computer_use.is_some()),
+        ("advisor", step.advisor),
         ("output_file", step.output_file.is_some()),
         ("squash-merge", step.squash_merge.is_some()),
         ("permission", step.permission.is_some()),

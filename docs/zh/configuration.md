@@ -56,7 +56,7 @@ cruise 按以下方式解析工作流配置：
 
 - `env` 和 `mcp_servers` 按键合并（较高层级的值优先）。
 - `command` 和 `sdk` 构成一对：如果某一层设置了其中任意一项，则忽略所有较低层级中的这一对设置。
-- 其他字段（`model`、`plan_model`、`subagent_model`、`max_retries`、`interactive_planning`、`cleanup_after_pr`、`force_exec`、`computer_use`、`permission`、`disallowed_tools`、`retry`、`formal_verify`、`commit_message_template`、`pr_body_template`）取自设置了相应字段的最高层级。`languages.plan` 和 `languages.pr` 分别独立解析（参见[提示词语言](#prompt-languages)）。限制列表在各层级之间采用替换方式；在工作流中显式设置 `disallowed_tools: []` 会清除继承的默认值。
+- 其他字段（`model`、`plan_model`、`advisor_model`、`subagent_model`、`max_retries`、`interactive_planning`、`cleanup_after_pr`、`force_exec`、`computer_use`、`permission`、`disallowed_tools`、`retry`、`formal_verify`、`commit_message_template`、`pr_body_template`）取自设置了相应字段的最高层级。`languages.plan` 和 `languages.pr` 分别独立解析（参见[提示词语言](#prompt-languages)）。限制列表在各层级之间采用替换方式；在工作流中显式设置 `disallowed_tools: []` 会清除继承的默认值。
 - 如果默认配置指定的后端（`command` / `sdk`）与工作流不同，且会填充未设置的后端专属字段（例如 `model`、`retry`、`mcp_servers`），校验会失败。请在工作流中设置相应字段，或从 `default.yaml` 中移除。
 
 `pre_steps:` 定义仅执行命令的步骤（`command`、`env`、`timeout`、`skip`、`when`），这些步骤会以 `pre/<name>` 的形式插入工作流 `steps` 的开头。它们不会在规划阶段或 `after-pr` 中运行。用户步骤排在前面，项目步骤排在后面；与用户步骤同名的项目步骤会在原位置替换该用户步骤。
@@ -102,6 +102,7 @@ model: sonnet             # default model for all prompt steps (optional)
 # In SDK mode, arrays use the first model, then fall back in order.
 # model: [sonnet, opus, gpt-5.5]
 plan_model: opus          # model used for the built-in plan step (optional)
+advisor_model: opus       # 顾问步骤所用的模型（可选）
 # subagent_model: claude/claude-haiku-4-5 # Jcode only: one plain model string
 languages:                # prompt languages (optional; defaults to English)
   pr: English             # language for auto-generated PR title/body
@@ -233,6 +234,7 @@ pr_body_template: |
 |---|---|---|
 | `CRUISE_MODEL` | `model` | 模型 |
 | `CRUISE_PLAN_MODEL` | `plan_model` | 模型 |
+| `CRUISE_ADVISOR_MODEL` | `advisor_model` | 模型 |
 | `CRUISE_SUBAGENT_MODEL` | `subagent_model` | 模型条目 |
 | `CRUISE_SDK` | `sdk` | 文本（仅 `jcode`） |
 | `CRUISE_COMMAND` | `command` | JSON 数组 |

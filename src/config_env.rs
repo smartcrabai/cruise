@@ -123,6 +123,12 @@ pub static WORKFLOW_ENV_KEYS: &[WorkflowEnvKey] = &[
     key!("CRUISE_MODEL", "model", Model, model),
     key!("CRUISE_PLAN_MODEL", "plan_model", Model, plan_model),
     key!(
+        "CRUISE_ADVISOR_MODEL",
+        "advisor_model",
+        Model,
+        advisor_model
+    ),
+    key!(
         "CRUISE_SUBAGENT_MODEL",
         "subagent_model",
         Model,

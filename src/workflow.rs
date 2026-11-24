@@ -169,6 +169,7 @@ pub struct CompiledWorkflow {
     pub model: Option<crate::config::ModelSpec>,
     pub subagent_model: Option<crate::config::ModelEntry>,
     pub plan_model: Option<crate::config::ModelSpec>,
+    pub advisor_model: Option<crate::config::ModelSpec>,
     pub env: HashMap<String, String>,
     /// Language to use for PR title/body generation.
     pub pr_language: String,
@@ -216,6 +217,7 @@ impl CompiledWorkflow {
             model: self.model.clone(),
             subagent_model: self.subagent_model.clone(),
             plan_model: self.plan_model.clone(),
+            advisor_model: self.advisor_model.clone(),
             env: self.env.clone(),
             pr_language: self.pr_language.clone(),
             plan_language: self.plan_language.clone(),
@@ -249,6 +251,7 @@ impl CompiledWorkflow {
 /// membership style, contains empty groups, nested group calls, or
 /// individual `if` conditions inside group steps.
 pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
+    crate::config::validate_advisor(&config)?;
     crate::config::validate_require_bubblewrap(&config)?;
     crate::config::validate_accepted_exit_codes(&config)?;
     crate::config::validate_quality_gates(&config)?;
@@ -272,6 +275,7 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
         model: config.model,
         subagent_model: config.subagent_model,
         plan_model: config.plan_model,
+        advisor_model: config.advisor_model,
         env: config.env,
         pr_language,
         plan_language,

@@ -50,6 +50,19 @@ steps:
 
 jcode 子智能体模型必须解析为有效的非空模型。
 
+<a id="advisor-steps"></a>
+### 顾问步骤
+
+`advisor: true` 只能用于顶层 `steps` 下的普通提示步骤，包括通过 `workflow_call` 内联到此处的步骤。必须设置 `output_file`，且不得设置 `allow_commit: true`。无论工作流的默认权限是什么，该步骤都会强制使用[只读权限](#permission-modes)。请省略步骤的 `permission` 或设为 `read-only`。
+
+模型按步骤 `model` → `advisor_model` → `plan_model` → 工作流 `model` 的顺序选择，空数组视为未设置。与 `plan_model` 一样，`advisor_model` 接受模型字符串，或包含可选 `disabled_during` 项的回退数组。可在工作流或用户／项目的 `default.yaml` 中设置，也可用 `CRUISE_ADVISOR_MODEL`（字符串或 JSON 数组）覆盖。它不是 `cruise config` 的设置项，也不影响其他提示。
+
+启用的顾问步骤需要 jcode。执行前检查（包括试运行）会豁免因标志关闭或被用户明确跳过的顾问步骤。`cruise workflow doctor` 只应用基于标志的跳过。顾问不会消耗 `cruise tell` 排队的指令。
+
+执行前，Cruise 会生成会话产物 `<output_file>.diff`，可通过 `{file:<output_file>.diff}` 读取。文件先列出变更统计，再列出相对于 `HEAD` 的未提交补丁，包括未跟踪且未被忽略的文件，但排除 `.worktreeinclude` 中列出的路径。超过 256 KiB 时会在行边界截断并加上提示。每次尝试前或跳过步骤时，Cruise 都会清除旧建议，仅在成功后写入新建议。如果没有新建议，通过 `{file:<output_file>}` 读取时会报错，不会使用旧内容。
+
+普通错误（如无法生成 diff、后端报错、超时）可通过 `if.fail` 处理。如果 Cruise 检测到工作区变化、无法验证工作区，或用户中断，则无论 `if.fail` 如何设置都会停止运行。建议和 diff 都是不可信参考资料，不能作为指令、流程控制或审批的输入。
+
 <a id="sdk-jcode--the-jcode-sdk-default"></a>
 ### `sdk: jcode` — jcode SDK（默认）
 

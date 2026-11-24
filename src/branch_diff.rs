@@ -64,15 +64,27 @@ fn checked_git(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+#[derive(Clone, Copy)]
+enum PatchExitPolicy {
+    Tracked,
+    NoIndex,
+    StrictNoIndex,
+}
+
 fn append_patch(
     dir: &Path,
     args: &[&str],
     file: Option<&OsStr>,
     patch: &mut Vec<u8>,
     truncated: &mut bool,
-    no_index: bool,
+    exit_policy: PatchExitPolicy,
+    byte_cap: usize,
 ) -> Result<()> {
-    let mut child = Command::new("git")
+    let mut git = Command::new("git");
+    if matches!(exit_policy, PatchExitPolicy::StrictNoIndex) {
+        git.env("LC_ALL", "C");
+    }
+    let mut child = git
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -100,13 +112,9 @@ fn append_patch(
             if n == 0 {
                 break;
             }
-            let keep = n.min(
-                MAX_PATCH_BYTES
-                    .saturating_add(1)
-                    .saturating_sub(patch.len()),
-            );
+            let keep = n.min(byte_cap.saturating_add(1).saturating_sub(patch.len()));
             patch.extend_from_slice(&buffer[..keep]);
-            if keep < n || patch.len() > MAX_PATCH_BYTES {
+            if keep < n || patch.len() > byte_cap {
                 *truncated = true;
             }
         }
@@ -122,7 +130,14 @@ fn append_patch(
         .map_err(|_| CruiseError::Other("git stderr reader failed".into()))?;
     read_result?;
     stderr_result?;
-    if !(status.success() || no_index && status.code() == Some(1)) {
+    let accepts_difference = match exit_policy {
+        PatchExitPolicy::Tracked => false,
+        PatchExitPolicy::NoIndex => true,
+        PatchExitPolicy::StrictNoIndex => !stderr.split(|&byte| byte == b'\n').any(|line| {
+            line.starts_with(b"error:") || line.starts_with(b"fatal:")
+        }),
+    };
+    if !(status.success() || accepts_difference && status.code() == Some(1)) {
         return Err(git_error(
             args,
             &Output {
@@ -234,23 +249,100 @@ pub fn session_branch_diff(state: &SessionState, color: bool) -> Result<BranchDi
         Some(ctx) => (ctx.path.as_path(), DiffSource::Worktree),
         None => (state.base_dir.as_path(), DiffSource::CommittedOnly),
     };
+    let DiffParts {
+        stat,
+        patch,
+        truncated,
+    } = diff_parts(
+        dir,
+        &base,
+        (source == DiffSource::CommittedOnly).then_some(reference.as_str()),
+        &state.base_dir,
+        color,
+        MAX_PATCH_BYTES,
+        Some(UNTRACKED_FILE_LIMIT),
+        false,
+        PatchExitPolicy::NoIndex,
+    )?;
+    Ok(BranchDiff {
+        branch: name,
+        base_commit: base,
+        source,
+        stat,
+        patch,
+        truncated,
+    })
+}
+
+pub(crate) struct DiffParts {
+    pub(crate) stat: String,
+    pub(crate) patch: String,
+    pub(crate) truncated: bool,
+}
+
+/// Compare a working directory (including non-ignored untracked files) to a revision.
+pub(crate) fn worktree_diff(dir: &Path, base: &str, byte_cap: usize) -> Result<DiffParts> {
+    diff_parts(
+        dir,
+        base,
+        None,
+        dir,
+        false,
+        byte_cap,
+        None,
+        true,
+        PatchExitPolicy::StrictNoIndex,
+    )
+}
+
+fn diff_parts(
+    dir: &Path,
+    base: &str,
+    committed_ref: Option<&str>,
+    include_dir: &Path,
+    color: bool,
+    byte_cap: usize,
+    untracked_file_limit: Option<usize>,
+    exclude_tracked_includes: bool,
+    no_index_exit_policy: PatchExitPolicy,
+) -> Result<DiffParts> {
+    let excluded = if committed_ref.is_none() {
+        includes(include_dir)?
+    } else {
+        Vec::new()
+    };
+    let pathspecs: Vec<_> = if exclude_tracked_includes {
+        excluded
+            .iter()
+            .map(|path| format!(":(exclude,literal){path}"))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut args = diff_args(color);
-    args.push(&base);
-    if source == DiffSource::CommittedOnly {
-        args.push(&reference);
-    }
+    args.push(base);
+    args.extend(committed_ref);
+    args.push("--");
+    args.extend(pathspecs.iter().map(String::as_str));
     let mut patch = Vec::new();
     let mut truncated = false;
-    append_patch(dir, &args, None, &mut patch, &mut truncated, false)?;
+    append_patch(
+        dir,
+        &args,
+        None,
+        &mut patch,
+        &mut truncated,
+        PatchExitPolicy::Tracked,
+        byte_cap,
+    )?;
     let mut stat_args = diff_args(false);
     stat_args.push("--stat");
-    stat_args.push(&base);
-    if source == DiffSource::CommittedOnly {
-        stat_args.push(&reference);
-    }
+    stat_args.push(base);
+    stat_args.extend(committed_ref);
+    stat_args.push("--");
+    stat_args.extend(pathspecs.iter().map(String::as_str));
     let mut stat = checked_git(dir, &stat_args)?;
-    if source == DiffSource::Worktree {
-        let excluded = includes(&state.base_dir)?;
+    if committed_ref.is_none() {
         let output = git(dir, &["ls-files", "--others", "--exclude-standard", "-z"])?;
         if !output.status.success() {
             return Err(git_error(&["ls-files"], &output));
@@ -273,7 +365,7 @@ pub fn session_branch_diff(state: &SessionState, color: bool) -> Result<BranchDi
             if excluded.iter().any(|e| file.starts_with(Path::new(e))) {
                 continue;
             }
-            if count == UNTRACKED_FILE_LIMIT {
+            if untracked_file_limit == Some(count) {
                 truncated = true;
                 break;
             }
@@ -281,31 +373,43 @@ pub fn session_branch_diff(state: &SessionState, color: bool) -> Result<BranchDi
             let _ = writeln!(stat, " {} | untracked", file.display());
             let mut args = diff_args(color);
             args.extend(["--no-index", "--", "/dev/null"]);
+            let operand = if matches!(no_index_exit_policy, PatchExitPolicy::StrictNoIndex)
+                && file.as_os_str() == "-"
+            {
+                std::ffi::OsStr::new("./-")
+            } else {
+                file.as_os_str()
+            };
             append_patch(
                 dir,
                 &args,
-                Some(file.as_os_str()),
+                Some(operand),
                 &mut patch,
                 &mut truncated,
-                true,
+                no_index_exit_policy,
+                byte_cap,
             )?;
         }
     }
-    let mut patch = String::from_utf8_lossy(&patch).into_owned();
-    if patch.len() > MAX_PATCH_BYTES {
-        let end = patch.as_bytes()[..MAX_PATCH_BYTES]
-            .iter()
-            .rposition(|&b| b == b'\n')
-            .map_or(0, |i| i + 1);
-        patch.truncate(end);
-        truncated = true;
-    }
-    Ok(BranchDiff {
-        branch: name,
-        base_commit: base,
-        source,
+    let mut patch = String::from_utf8(patch)
+        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned());
+    truncated |= truncate_at_line(&mut patch, byte_cap);
+    Ok(DiffParts {
         stat,
         patch,
         truncated,
     })
+}
+
+/// Cap UTF-8 text at the last complete line that fits.
+pub(crate) fn truncate_at_line(text: &mut String, byte_cap: usize) -> bool {
+    if text.len() <= byte_cap {
+        return false;
+    }
+    let end = text.as_bytes()[..byte_cap]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |i| i + 1);
+    text.truncate(end);
+    true
 }

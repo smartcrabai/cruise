@@ -46,6 +46,79 @@ const AFTER_PR_IDS: [&str; 9] = [
 ];
 const MAX_RETRIES: usize = 3;
 
+#[test]
+fn tdd_materializes_one_opt_in_advisor_pass() {
+    let project = tempfile::tempdir().unwrap();
+    let builtin = BUILTIN_WORKFLOWS
+        .iter()
+        .find(|entry| entry.name == "tdd")
+        .unwrap();
+    let config = resolve_workflow_config(
+        builtin.yaml,
+        &ConfigSource::NamedBuiltin("tdd"),
+        project.path(),
+        Some(project.path()),
+    )
+    .unwrap();
+    let enabled = FlagValues::from([("advisor".into(), true)]);
+    flags::validate_names(&config, &enabled).expect("tdd must declare the advisor flag");
+    validate_config(&config).unwrap();
+    let compiled = compile(config).unwrap();
+    let ids: Vec<_> = compiled.steps.keys().map(String::as_str).collect();
+    assert!(
+        ids.windows(4).any(|steps| steps
+            == [
+                "implement-after-tests",
+                "advise",
+                "apply-advice",
+                "formal-methods"
+            ]),
+        "unexpected tdd step order: {ids:?}"
+    );
+
+    let advise = &compiled.steps["advise"];
+    let apply = &compiled.steps["apply-advice"];
+    let advisor_attribute = |step| {
+        serde_yaml::to_value(step).unwrap()["advisor"]
+            .as_bool()
+            .unwrap_or(false)
+    };
+    assert!(advisor_attribute(advise));
+    assert!(!advisor_attribute(apply));
+    assert_eq!(
+        advise.output_file.as_deref(),
+        Some("advisor/implementation.md")
+    );
+    assert!(matches!(
+        advise.if_condition.as_ref().and_then(|condition| condition.fail.as_ref()),
+        Some(FailAction::Goto(target)) if target == "formal-methods"
+    ));
+    assert!(apply.if_condition.is_none());
+    for input in [
+        "{plan}",
+        "{prev.output}",
+        "{file:advisor/implementation.md.diff}",
+    ] {
+        assert!(
+            advise.prompt.as_deref().unwrap().contains(input),
+            "missing advisor input {input}"
+        );
+    }
+    let apply_prompt = apply.prompt.as_deref().unwrap();
+    assert!(apply_prompt.contains("{file:advisor/implementation.md}"));
+    assert!(!apply_prompt.contains("{prev.output}"));
+
+    let off = flags::preflight_skips(&compiled, &FlagValues::new(), &[]);
+    let on = flags::preflight_skips(&compiled, &enabled, &[]);
+    for name in ["advise", "apply-advice"] {
+        assert!(off.iter().any(|step| step == name), "{name} must be opt-in");
+        assert!(
+            !on.iter().any(|step| step == name),
+            "{name} must run when enabled"
+        );
+    }
+}
+
 /// Built-ins with `force_exec: true` run only through exec and expose no after-PR graph.
 const FORCE_EXEC_BUILTINS: [&str; 4] = ["refactor", "add-tests", "add-formal-specs", "security"];
 

@@ -120,6 +120,58 @@ pub fn read(root: &Path, name: &str) -> Result<String> {
     })
 }
 
+/// Remove a regular session artifact. A missing root or artifact is harmless.
+///
+/// # Errors
+/// Returns an error for an unsafe name, a symlink, a non-regular artifact,
+/// or a filesystem error other than a missing path.
+pub fn remove(root: &Path, name: &str) -> Result<()> {
+    let relative = validate_name_for_io(name)?;
+    ensure_directory_ancestors(root, name, remove_error)?;
+
+    let mut path = root.to_path_buf();
+    let mut components = relative.components();
+    loop {
+        let next = components.next();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(remove_error(name, &error)),
+        };
+        if is_link_or_reparse(&metadata) {
+            return Err(remove_error(
+                name,
+                &std::io::Error::other("artifact path contains a symbolic link"),
+            ));
+        }
+        if let Some(component) = next {
+            if !metadata.is_dir() {
+                return Err(remove_error(
+                    name,
+                    &std::io::Error::other("artifact parent is not a directory"),
+                ));
+            }
+            path.push(component.as_os_str());
+        } else {
+            if !metadata.is_file() {
+                return Err(remove_error(
+                    name,
+                    &std::io::Error::other("artifact is not a regular file"),
+                ));
+            }
+            return match fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(remove_error(name, &error)),
+            };
+        }
+    }
+}
+
+fn remove_error(name: &str, error: &std::io::Error) -> CruiseError {
+    CruiseError::Other(format!("failed to remove artifact '{name}': {error}"))
+}
+
 /// Atomically save an artifact, replacing an existing regular file only after
 /// the complete new contents have been written.
 ///
@@ -401,6 +453,42 @@ mod tests {
         assert!(validate_name("").is_err());
         assert!(validate_name("/tmp/file.md").is_err());
         assert!(validate_name("../file.md").is_err());
+    }
+
+    #[test]
+    fn removes_only_the_named_artifact_and_tolerates_missing_paths() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("artifacts");
+        remove(&root, "nested/advice.md")?;
+        assert!(!root.exists());
+        write(&root, "nested/advice.md", "old advice")?;
+        write(&root, "nested/other.md", "keep")?;
+        remove(&root, "nested/advice.md")?;
+        remove(&root, "nested/advice.md")?;
+        assert!(read(&root, "nested/advice.md").is_err());
+        assert_eq!(read(&root, "nested/other.md")?, "keep");
+        assert!(remove(&root, "nested").is_err());
+        assert!(remove(&root, "../outside").is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removal_refuses_symlink_components_and_leaf() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("artifacts");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&root)?;
+        fs::create_dir(&outside)?;
+        fs::write(outside.join("advice.md"), "untouched")?;
+        symlink(&outside, root.join("linked-dir"))?;
+        symlink(outside.join("advice.md"), root.join("linked-file"))?;
+        assert!(remove(&root, "linked-dir/advice.md").is_err());
+        assert!(remove(&root, "linked-file").is_err());
+        assert_eq!(fs::read_to_string(outside.join("advice.md"))?, "untouched");
+        Ok(())
     }
 
     #[test]

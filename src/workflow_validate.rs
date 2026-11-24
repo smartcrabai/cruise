@@ -21,6 +21,7 @@ pub fn validate_generated_yaml(yaml: &str, base_dir: &Path) -> Result<()> {
     crate::config::validate_group_retry_budget(&config, max_retries)?;
     let compiled = crate::workflow::compile(config)?;
     let graph = crate::graph::build_graph(&compiled, max_retries)?;
-    crate::graph::validation::validate_workflow(&compiled, &graph, &graph.start, &[])?;
+    let skips = crate::flags::preflight_skips(&compiled, &crate::flags::NO_FLAGS, &[]);
+    crate::graph::validation::validate_workflow(&compiled, &graph, &graph.start, &skips)?;
     Ok(())
 }

@@ -143,6 +143,8 @@ Either path logs the declared reason (`intentional no-changes declared: <reason>
 
 Parallel children cannot make this declaration for their parent: child output markers remain inside the aggregate JSON, and children do not receive the structured action. A parent `if.no-file-changes` condition still evaluates file changes across the entire block.
 
+Advisor steps ignore the `NO_CHANGES_INTENTIONAL:` marker and do not register the structured `skip_step` action. Any configured `if.no-file-changes` action still applies.
+
 ## `if: fail:` — failure handler
 
 Specifies what to do when the step has a **recoverable failure**: a command exits non-zero, the step times out (see `timeout` below), a recoverable prompt error occurs, or a `no-file-changes: failed` directive triggers. A missing-model error from a jcode prompt bypasses `if.fail` and aborts the workflow. The value is either a step name (jump) or a mapping; only `{ retry: true }` re-executes the same step. `{}`, `{ retry: false }`, and mappings with unknown keys parse (`retry` defaults to `false`, unknown keys are ignored) and fall through to the normal transition without retrying.
@@ -163,6 +165,8 @@ steps:
 ```
 
 ### Constraints on `if.fail`
+
+For [advisor steps](sdk.md#advisor-steps), provider errors, missing diff, and ordinary timeouts can take `if.fail`. Workspace changes, an unverifiable read-only snapshot, and interruption bypass that route and stop the run. In `builtin:tdd` the ordinary failure route bypasses `apply-advice`; successful advice always reaches it, even for `NO FINDINGS`.
 
 - In `after-pr`, `if.fail` is supported only as a named jump on command steps and on the native `squash-merge: true` step; prompt steps and `{ retry: true }` are rejected there.
 - On the native step, GitHub's confirmed behind/diverged base ancestry or `CONFLICTING`/`DIRTY` mergeability can route to `if.fail`; other readiness failures remain errors. The built-in `follow-up/sync-base` handler runs sync-base → resolve-conflict → push-after-sync → wait-ci → fix-ci-error. Only native `ResyncRequired` routing from `squash-merge` to its `if.fail` target starts a fresh after-PR pass: it resets `budgeted_traversals` for every after-PR edge except `squash-merge` → target and clears group retry counts, preserving edge traversal history. The resync edge remains capped at `max_retries`; generic `if.fail` retains shared budgets. Worst case: up to `max_retries` resyncs, each pass allowing up to `max_retries - 1` CI-fix iterations; zero retry budget permits no resync. This GitHub-only ancestry check does not change GitLab behavior.

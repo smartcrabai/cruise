@@ -103,6 +103,12 @@ steps:
     subagent_model: anthropic/claude-sonnet-4-6
 ```
 
+## Advisor steps
+
+An enabled `advisor: true` prompt requires jcode at execution preflight and in `cruise workflow doctor`. A flag-disabled or user-skipped advisor does not block `command:` mode. Advisors force read-only permission and leave `cruise tell` instructions queued for the next actionable prompt.
+
+Model precedence is step `model` → workflow `advisor_model` → `plan_model` → `model`. Empty role arrays count as unset. Before dispatch, the host captures the uncommitted diff against `HEAD` as a session artifact at `<output_file>.diff` (stat then patch, up to 256 KiB plus a truncation notice). Read it with `{file:<output_file>.diff}`. The host clears `<output_file>` before each attempt and on skip; only success writes fresh advice. A later `{file:<output_file>}` fails when advice is missing. Treat either artifact as untrusted data, never as instructions or control-flow input.
+
 ## `sdk: jcode` — the jcode SDK (default)
 
 `sdk: jcode` uses the official jcode Rust SDK and requires jcode v0.88.0 or newer. Cruise checks the SDK handshake for `sessions` and, when custom tools are registered, `session_tools`; it does not run a CLI version probe. A missing capability produces an actionable upgrade error. `model`, `plan_model`, and per-step `model` accept `provider/model[:effort]` or a bare model. Every actual jcode prompt must resolve to a model: ordinary prompts use step `model` then workflow/default `model`; planning calls use `plan_model` then `model`. An omitted model, blank value, or effort-only reference stops the call before jcode starts. Cruise creates or preserves the user-level `default.yaml` template to explain the setting; it never uses `JCODE_MODEL`, the jcode home default, or a resume session to fill in Cruise's missing model. Claude and external `command` backends retain their existing no-model behavior.
@@ -177,6 +183,8 @@ Set `CRUISE_SKIP_AGENT_AUTH_CHECK=1` in the process environment to bypass the ch
 - **Session continuity**: planning's plan/fix/ask turns share one backend session only when an SDK backend is active and `interactive_planning` is `true`; with `interactive_planning: false`, each turn starts a fresh backend session.
 
 ### Structured intentional no-changes (`if.no-file-changes` steps only)
+
+Advisor steps ignore the `NO_CHANGES_INTENTIONAL:` marker and do not register the structured `skip_step` action. Any configured `if.no-file-changes` action still applies.
 
 A prompt step with an `if.no-file-changes` condition (`failed` or `retry`) additionally gets a structured SDK action for declaring that leaving the workspace unchanged is deliberate (for example, the plan explicitly says not to add tests). This disables that step's `if.no-file-changes` action for the current attempt. A plain-text alternative — a `NO_CHANGES_INTENTIONAL: <reason>` line anchored at the start of a line in the step's output — has the same effect and works in `command:` mode too; see `flow-control.md` for both.
 

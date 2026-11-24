@@ -47,6 +47,8 @@ CLI flags and saved session cleanup overrides win where applicable. `CRUISE_RUN_
 nested language fields take precedence over the deprecated top-level fields,
 then the first non-empty variable among `LC_ALL`, `LC_MESSAGES`, `LANG`, and `LANGUAGE` is mapped once; if that value is not a supported locale, no other variable is consulted and the default is `English`. Unsupported or language-neutral locales use `English`.
 
+`CRUISE_ADVISOR_MODEL` overrides workflow `advisor_model` as a literal model string or JSON fallback array. A blank value is ignored. It affects only [advisor prompts](sdk.md#advisor-steps).
+
 ## Session title generation
 
 After plan approval, cruise sets a concise session title of at most 80 characters for `cruise list` and the WebUI sidebar:

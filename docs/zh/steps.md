@@ -29,6 +29,8 @@ steps:
 
 设置 `output_file` 后，Cruise 会将后端完成的响应保存在工作区之外、会话的 `artifacts/` 目录中。后续提示正文可以通过 `{file:initial-state.md}` 读取该文件。
 
+`advisor: true` 将顶层提示步骤设为[只读顾问步骤](sdk.md#advisor-steps)，并要求设置 `output_file`。
+
 `instruction` 是步骤运行前显示给用户的消息，不是系统提示。如果 `{input}` 为空，这条消息会作为多行输入提示，用户提交的文字将成为 `{input}`；否则只会显示消息，不会将其发送给 LLM。
 
 默认情况下，提示步骤受提交保护。SDK 提示还会应用[工具限制](sdk.md#tool-restrictions)中描述的隐式 Git shell 拒绝规则；`allow_commit: true` 会移除这些拒绝规则和提交保护，但不会移除显式的 `disallowed_tools`，也不会授予更广泛的权限。只有提示确实需要创建提交或以其他方式移动 Git `HEAD` 时才设置 `allow_commit: true`；省略该值或设为 `false` 都会保留保护。此保护适用于传统的 `command:` 模式和 `sdk: jcode`，而 command 和 option 步骤不受影响。

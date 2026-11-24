@@ -283,11 +283,29 @@ pub fn validate_workflow(
     entry: &str,
     skipped: &[String],
 ) -> Result<()> {
+    validate_advisor_backend(compiled, skipped)?;
     validate_execution_graph(graph, compiled, entry, skipped, "main")?;
     if !compiled.after_pr.is_empty() {
         let after = compiled.to_after_pr_compiled();
         let graph = build_graph(&after, graph.max_retries)?;
         validate_execution_graph(&graph, &after, &graph.start, skipped, "after-pr")?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_advisor_backend(
+    compiled: &CompiledWorkflow,
+    skipped: &[String],
+) -> Result<()> {
+    if !compiled.command.is_empty()
+        && let Some((name, _)) = compiled
+            .steps
+            .iter()
+            .find(|(name, step)| step.advisor && !skipped.contains(name))
+    {
+        return Err(CruiseError::InvalidStepConfig(format!(
+            "step '{name}' uses advisor, which requires the jcode backend"
+        )));
     }
     Ok(())
 }

@@ -128,6 +128,10 @@ For ordered Jcode model fallback strings and scheduling, see `SDK_MODELS.md`
 and run `bash scripts/check_sdk_model_specs.sh`. The suite includes Quint,
 Alloy, production Cucumber, CLI configuration and fallback contracts.
 
+For the opt-in advisor pass, see `ADVISOR.md` and run `bash scripts/check_advisor_specs.sh`.
+The bounded models check artifact freshness, fatal guard outcomes, model precedence,
+and allowed placements. The runner also exercises production execution and preflight.
+
 For Jcode-only task-scoped subagent model precedence and route setup, see
 `SUBAGENT_MODEL.md` and run `bash scripts/check_subagent_model_specs.sh`. The
 suite covers validation, jcode API-frame ordering, and no-send on setting failure.

@@ -57,7 +57,7 @@ cruise は次の順序でワークフロー設定を解決します。
 
 - `env` と `mcp_servers` は key ごとにマージし、上位レイヤーが優先されます。
 - `command` と `sdk` は一組です。あるレイヤーがどちらかを設定すると、下位レイヤーの組は無視されます。
-- その他の field (`model`、`plan_model`、`subagent_model`、`max_retries`、`interactive_planning`、`cleanup_after_pr`、`force_exec`、`computer_use`、`permission`、`disallowed_tools`、`retry`、`formal_verify`、`commit_message_template`、`pr_body_template`) は、最上位で設定されたレイヤーの値を使います。`languages.plan` と `languages.pr` は個別に解決します（[prompt の言語](#prompt-languages)参照）。制限リストはレイヤー間で置換されます。workflow の `disallowed_tools: []` を明示すると継承した default をクリアします。
+- その他の field (`model`、`plan_model`、`advisor_model`、`subagent_model`、`max_retries`、`interactive_planning`、`cleanup_after_pr`、`force_exec`、`computer_use`、`permission`、`disallowed_tools`、`retry`、`formal_verify`、`commit_message_template`、`pr_body_template`) は、最上位で設定されたレイヤーの値を使います。`languages.plan` と `languages.pr` は個別に解決します（[prompt の言語](#prompt-languages)参照）。制限リストはレイヤー間で置換されます。workflow の `disallowed_tools: []` を明示すると継承した default をクリアします。
 - Worktree 設定 `base_branch` と `auto_fetch` は default 専用 key で、project 値が user 値に優先します。マージ後の `base_branch` が空であれば `auto_fetch: true` は無効です。
 - default が workflow と異なる種類の backend（`command` / `sdk`）を指定し、backend 固有の未設定 field（`model`、`retry`、`mcp_servers` など）を補う場合は検証エラーになります。workflow で field を設定するか、`default.yaml` から削除してください。
 
@@ -104,6 +104,7 @@ model: sonnet             # default model for all prompt steps (optional)
 # In SDK mode, arrays use the first model, then fall back in order.
 # model: [sonnet, opus, gpt-5.5]
 plan_model: opus          # model used for the built-in plan step (optional)
+advisor_model: opus       # アドバイザーステップ用モデル（省略可）
 # subagent_model: claude/claude-haiku-4-5 # Jcode only: one plain model string
 languages:                # prompt languages (optional; defaults to English)
   pr: English             # language for auto-generated PR title/body
@@ -235,6 +236,7 @@ process-level 設定 override は workflow と default の解決後に適用さ�
 |---|---|---|
 | `CRUISE_MODEL` | `model` | model |
 | `CRUISE_PLAN_MODEL` | `plan_model` | model |
+| `CRUISE_ADVISOR_MODEL` | `advisor_model` | model |
 | `CRUISE_SUBAGENT_MODEL` | `subagent_model` | model entry |
 | `CRUISE_SDK` | `sdk` | text（`jcode` のみ） |
 | `CRUISE_COMMAND` | `command` | JSON array |

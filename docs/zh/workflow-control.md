@@ -146,6 +146,8 @@ steps:
 <a id="failure-handling-iffail"></a>
 ### 失败处理（`if.fail`）
 
+如果[顾问步骤](sdk.md#advisor-steps)检测到工作区变化、无法验证工作区，或用户中断，则运行会停止，不会进入 `if.fail` 分支。
+
 `if.fail` 决定发生可恢复的步骤失败时如何处理：命令步骤返回非零退出码、发生可恢复的提示错误（包括 LLM 传输错误）、发生 `timeout`，或触发 `no-file-changes: failed`。
 
 - **`fail: <step-name>`** —— 跳转到指定名称的步骤。

@@ -9,9 +9,12 @@ use crate::error::{CruiseError, Result};
 use crate::model_selection::Sdk;
 
 #[derive(Clone, Copy)]
-pub(crate) enum AuthScope {
+pub(crate) enum AuthScope<'a> {
     Planning,
-    Execution,
+    Execution {
+        flags: &'a crate::flags::FlagValues,
+        skipped_steps: &'a [String],
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -135,7 +138,7 @@ fn judge_accounts(accounts: impl Iterator<Item = OAuthExpiry>, now_ms: i64) -> V
 
 pub(crate) fn ensure_agents_authenticated(
     config: &WorkflowConfig,
-    scope: AuthScope,
+    scope: AuthScope<'_>,
     cwd: Option<&Path>,
 ) -> Result<()> {
     if std::env::var("CRUISE_SKIP_AGENT_AUTH_CHECK").is_ok_and(|value| value == "1")
@@ -148,7 +151,9 @@ pub(crate) fn ensure_agents_authenticated(
     }
     let candidates = match scope {
         AuthScope::Planning => crate::config::planning_model_candidates(config),
-        AuthScope::Execution => crate::config::execution_model_candidates(config),
+        AuthScope::Execution { flags, skipped_steps } => {
+            crate::config::execution_model_candidates(config, flags, skipped_steps)
+        }
     };
     let mut targets = Vec::new();
     for candidate in candidates {

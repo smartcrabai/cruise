@@ -127,6 +127,9 @@ pub enum CruiseError {
     #[error("read-only step changed the workspace")]
     ReadOnlyWorkspaceChanged,
 
+    #[error("read-only workspace verification failed: {0}")]
+    ReadOnlyVerificationFailed(String),
+
     #[error("{0}")]
     Other(String),
 
@@ -174,6 +177,7 @@ impl CruiseError {
             Self::SquashMergeFailed(_) => "squash_merge_failed",
             Self::CommitGuardViolation(_) => "commit_guard_violation",
             Self::ReadOnlyWorkspaceChanged => "read_only_workspace_changed",
+            Self::ReadOnlyVerificationFailed(_) => "read_only_verification_failed",
             Self::Other(_) => "other",
             Self::StepPaused => "paused",
         }
@@ -469,6 +473,10 @@ mod tests {
             (
                 CruiseError::CommitGuardViolation("secret".into()),
                 "commit_guard_violation",
+            ),
+            (
+                CruiseError::ReadOnlyVerificationFailed("secret".into()),
+                "read_only_verification_failed",
             ),
             (CruiseError::Other("secret".into()), "other"),
         ];

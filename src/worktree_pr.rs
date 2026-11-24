@@ -3002,6 +3002,7 @@ mod tests {
             sdk: None,
             model: None,
             plan_model: None,
+            advisor_model: None,
             subagent_model: None,
             env: HashMap::new(),
             plan_language: "English".to_string(),

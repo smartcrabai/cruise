@@ -197,6 +197,7 @@ fn finish_parallel_step(
         failed,
         native_resync_required: false,
         skip_step_reason: None,
+        advice: None,
     })
 }
 

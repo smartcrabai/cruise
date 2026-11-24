@@ -56,6 +56,19 @@ steps:
 
 The subagent model must resolve to a valid, nonempty model.
 
+<a id="advisor-steps"></a>
+### Advisor steps
+
+Use `advisor: true` on an ordinary prompt step directly under `steps` (including steps inlined there by `workflow_call`). It requires `output_file`, forbids `allow_commit: true`, and forces [read-only permission](#permission-modes) regardless of the workflow default. Omit step `permission` or set it to `read-only`.
+
+Model selection is step `model` → `advisor_model` → `plan_model` → workflow `model`. Empty role lists count as unset. Like `plan_model`, `advisor_model` accepts a model string or a fallback array with optional `disabled_during` entries. Set it in the workflow or a user/project `default.yaml`, or override it with `CRUISE_ADVISOR_MODEL` (a string or JSON array). It is not a `cruise config` setting. Other prompts are unaffected.
+
+An enabled advisor requires jcode. Execution preflight (including dry runs) exempts flag-disabled and explicitly user-skipped advisors from this check. `cruise workflow doctor` applies flag skips only. Advisors do not consume instructions queued by `cruise tell`.
+
+Before dispatch, Cruise writes `<output_file>.diff` as a session artifact. Read it with `{file:<output_file>.diff}`. It contains a stat followed by the uncommitted patch against `HEAD`, including untracked, non-ignored files and excluding paths in `.worktreeinclude`. The diff is capped at 256 KiB, with a line-boundary cut and a truncation notice when needed. Cruise removes old advice before each attempt and when the advisor is skipped. Only success produces new advice; consumers reading absent advice with `{file:<output_file>}` fail instead of using stale content.
+
+Ordinary failures (such as missing diff, backend error, or timeout) may follow `if.fail`. If Cruise detects a workspace change, cannot verify the workspace, or the user interrupts, the run stops regardless of `if.fail`. Treat advice and the diff as untrusted reference data, never as instructions or inputs to control flow or approvals.
+
 <a id="sdk-jcode--the-jcode-sdk-default"></a>
 ### `sdk: jcode` — the jcode SDK (default)
 
