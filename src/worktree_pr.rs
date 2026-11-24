@@ -3859,7 +3859,7 @@ mod aborted_conflict_resume_tests {
     use super::{AfterPrCheckpoint, AfterPrResume, run_after_pr_steps_with_checkpoint};
 
     /// Resume a checkpoint saved at the conflict-commit step and return the step order.
-    async fn resume_from_conflict_commit(repo: &Path, plan: &Path) -> String {
+    async fn resume_from_conflict_commit(repo: &Path, plan: &Path) -> Vec<String> {
         let log = plan.with_file_name("order.log");
         let yaml = format!(
             "command: [echo]\nsteps:\n  main:\n    command: 'true'\nafter-pr:\n  sync-base:\n    command: 'echo sync >> {log} # {{cruise.bin}} internal sync-base'\n  push-after-sync:\n    env:\n      CRUISE_SYNC_PLAN: \"{{plan}}\"\n    command: 'echo push >> {log} # {{cruise.bin}} internal finish-conflict-commit'\n",
@@ -3912,7 +3912,12 @@ mod aborted_conflict_resume_tests {
         )
         .await
         .unwrap_or_else(|error| panic!("resume after-pr: {error}"));
-        std::fs::read_to_string(&log).unwrap_or_else(|error| panic!("read order: {error}"))
+        // Windows `cmd` echoes the trailing `# ...` marker too, so keep only the first word.
+        std::fs::read_to_string(&log)
+            .unwrap_or_else(|error| panic!("read order: {error}"))
+            .lines()
+            .filter_map(|line| line.split_whitespace().next().map(str::to_owned))
+            .collect()
     }
 
     #[tokio::test]
@@ -3922,7 +3927,7 @@ mod aborted_conflict_resume_tests {
 
         let order = resume_from_conflict_commit(&fixture.repo, &fixture.plan).await;
 
-        assert_eq!(order, "sync\npush\n");
+        assert_eq!(order, ["sync", "push"]);
     }
 
     #[tokio::test]
@@ -3931,6 +3936,6 @@ mod aborted_conflict_resume_tests {
 
         let order = resume_from_conflict_commit(&fixture.repo, &fixture.plan).await;
 
-        assert_eq!(order, "push\n");
+        assert_eq!(order, ["push"]);
     }
 }
