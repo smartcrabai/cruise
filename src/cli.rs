@@ -438,6 +438,7 @@ pub enum InternalCommand {
     ClearCiFollowup,
     CaptureCiFollowup,
     FinishCiFollowup,
+    RerunUnacquiredCi,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -714,6 +715,11 @@ pub struct ConfigArgs {
     /// Set the maximum automatic retries per session in a batch.
     #[arg(long = "set-auto-requeue-max-attempts", value_name = "N")]
     pub auto_requeue_max_attempts: Option<u32>,
+    /// Set the automatic reruns per PR head of GitHub Actions jobs no runner acquired.
+    ///
+    /// `0` disables them.
+    #[arg(long = "set-ci-unacquired-rerun-max-attempts", value_name = "N")]
+    pub ci_unacquired_rerun_max_attempts: Option<u32>,
 }
 
 #[derive(Parser, Debug)]

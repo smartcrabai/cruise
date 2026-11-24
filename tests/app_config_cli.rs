@@ -110,7 +110,7 @@ fn notification_defaults_remain_invisible_and_are_not_saved()
         assert!(shown.status.success(), "{}", output_text(&shown));
         assert_eq!(
             String::from_utf8_lossy(&shown.stdout),
-            "run_all_parallelism = 2\nrun_all_auto_requeue_max_attempts = 0\nprevent_sleep = false\nui_language = en (source: env)\n"
+            "run_all_parallelism = 2\nrun_all_auto_requeue_max_attempts = 0\nci_unacquired_rerun_max_attempts = 2\nprevent_sleep = false\nui_language = en (source: env)\n"
         );
         let updated = fixture.run(&["config", "--set-parallelism", "3"]);
         assert!(updated.status.success(), "{}", output_text(&updated));
@@ -232,6 +232,19 @@ fn auto_requeue_config_defaults_to_zero_and_persists_updates() {
 }
 
 #[test]
+fn ci_unacquired_rerun_config_defaults_to_two_and_persists_updates() {
+    let fixture = Fixture::new();
+    let shown = fixture.run(&["config"]);
+    assert!(shown.status.success(), "{}", output_text(&shown));
+    assert!(output_text(&shown).contains("ci_unacquired_rerun_max_attempts = 2"));
+    let zero = fixture.run(&["config", "--set-ci-unacquired-rerun-max-attempts", "0"]);
+    assert!(zero.status.success(), "{}", output_text(&zero));
+    let shown = fixture.run(&["config"]);
+    assert!(output_text(&shown).contains("ci_unacquired_rerun_max_attempts = 0"));
+    assert!(output_text(&shown).contains("run_all_auto_requeue_max_attempts = 0"));
+}
+
+#[test]
 fn auto_requeue_config_accepts_both_names_and_rejects_negative_values()
 -> Result<(), Box<dyn std::error::Error>> {
     for extension in ["json", "yaml"] {
@@ -312,7 +325,7 @@ fn yaml_config_show_and_set_parallelism_preserve_model_lists() {
     assert!(shown.status.success(), "{}", output_text(&shown));
     assert_eq!(
         String::from_utf8_lossy(&shown.stdout),
-        "run_all_parallelism = 3\nrun_all_auto_requeue_max_attempts = 0\nprevent_sleep = false\nmodel = [\"app/primary\",\"app/fallback\"]\nplan_model = [\"plan/primary\",\"plan/fallback\"]\nui_language = en (source: env)\n"
+        "run_all_parallelism = 3\nrun_all_auto_requeue_max_attempts = 0\nci_unacquired_rerun_max_attempts = 2\nprevent_sleep = false\nmodel = [\"app/primary\",\"app/fallback\"]\nplan_model = [\"plan/primary\",\"plan/fallback\"]\nui_language = en (source: env)\n"
     );
 
     let updated = fixture.run(&["config", "--set-parallelism", "7"]);
@@ -335,7 +348,7 @@ fn yaml_config_show_and_set_parallelism_preserve_model_lists() {
     );
     assert_eq!(
         String::from_utf8_lossy(&shown_after_update.stdout),
-        "run_all_parallelism = 7\nrun_all_auto_requeue_max_attempts = 0\nprevent_sleep = false\nmodel = [\"app/primary\",\"app/fallback\"]\nplan_model = [\"plan/primary\",\"plan/fallback\"]\nui_language = en (source: env)\n"
+        "run_all_parallelism = 7\nrun_all_auto_requeue_max_attempts = 0\nci_unacquired_rerun_max_attempts = 2\nprevent_sleep = false\nmodel = [\"app/primary\",\"app/fallback\"]\nplan_model = [\"plan/primary\",\"plan/fallback\"]\nui_language = en (source: env)\n"
     );
 }
 

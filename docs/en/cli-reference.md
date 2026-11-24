@@ -413,6 +413,8 @@ Options:
           Set the UI language, or clear the saved setting with auto.
       --set-auto-requeue-max-attempts <N>
           Set the automatic retry limit for Run All (0 disables it).
+      --set-ci-unacquired-rerun-max-attempts <N>
+          Set the automatic reruns per PR head of GitHub Actions jobs no runner acquired (0 disables them).
 ```
 
 Shows or updates application-level settings stored in `config.json` or `config.yaml` under `$XDG_CONFIG_HOME/cruise/` (default: `~/.config/cruise/`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **WebUI** executes in parallel during `run --all`. The CLI does not read this persisted value; use the one-shot `cruise run --all --parallelism <N>` flag instead.
@@ -426,6 +428,8 @@ Application configuration also accepts global output preferences; see [Global ou
 `cruise config` displays set preferences as JSON value lines, for example `languages = {"plan":"Japanese","pr":"English"}`, `commit_message_template = "{title} [{session_id}]"`, and `pr_body_template = "## Summary\n{body}"`. Updates to other application settings preserve them. Edits to `default.yaml` or application settings do not change a saved snapshot; supported workflow-override environment variables explicitly sent with a CLI request still apply in memory for that request, without rewriting the snapshot.
 
 `cruise config --set-auto-requeue-max-attempts <N>` sets `run_all_auto_requeue_max_attempts` for CLI and WebUI Run All. The CLI flag `--auto-requeue-max-attempts <N>` overrides it for one batch.
+
+`cruise config --set-ci-unacquired-rerun-max-attempts <N>` sets `ci_unacquired_rerun_max_attempts` (default `2`): how many times per PR head the after-PR workflow reruns GitHub Actions jobs that failed only because no runner acquired them. `0` disables these reruns.
 
 Set `prevent_sleep: true` in the machine-level `config.yaml` (or `"prevent_sleep": true` in `config.json`) to prevent sleep during runs on macOS; the default is `false`. This covers CLI and WebUI runs, but not planning alone. Other operating systems do nothing. Changes take effect on the next run. This setting is not supported in project `default.yaml`.
 

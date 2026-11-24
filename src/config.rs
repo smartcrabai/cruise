@@ -1281,9 +1281,11 @@ pub fn validate_if_conditions(config: &WorkflowConfig) -> crate::error::Result<(
 
     for (name, step) in &config.after_pr {
         if let Some(if_cond) = &step.if_condition {
-            if if_cond.fail.is_some() && step.squash_merge != Some(true) {
+            let command_jump =
+                step.command.is_some() && matches!(if_cond.fail, Some(FailAction::Goto(_)));
+            if if_cond.fail.is_some() && step.squash_merge != Some(true) && !command_jump {
                 return Err(CruiseError::InvalidStepConfig(format!(
-                    "step '{name}' in after-pr uses if.fail, which is only supported on native squash-merge",
+                    "step '{name}' in after-pr uses if.fail, which after-pr supports only as a named jump on command and native squash-merge steps",
                 )));
             }
             if if_cond.no_file_changes.is_some() {
@@ -4973,25 +4975,46 @@ steps:
     // --- if.fail validation tests ---
 
     #[test]
-    fn test_validate_rejects_if_fail_in_after_pr() {
+    fn test_validate_rejects_if_fail_on_after_pr_prompt_or_retry() {
+        for step in [
+            "prompt: summarize\n    if:\n      fail: notify",
+            "command: echo done\n    if:\n      fail:\n        retry: true",
+        ] {
+            let yaml = format!(
+                "command: [echo]\nsteps:\n  build:\n    command: cargo build\nafter-pr:\n  notify:\n    command: echo notify\n  report:\n    {step}\n"
+            );
+            let config = WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e:?}"));
+            let msg = err_string(validate_if_conditions(&config));
+            assert!(
+                msg.contains("after-pr") && msg.contains("report"),
+                "error should mention the after-pr step, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_accepts_if_fail_jump_on_after_pr_command() {
         let yaml = r"
 command: [echo]
 steps:
   build:
     command: cargo build
 after-pr:
-  notify:
-    command: echo done
+  check:
+    command: echo check
+    next: done
     if:
-      fail: rollback
+      fail: repair
+  repair:
+    command: echo repair
+  done:
+    command: echo done
 ";
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        let result = validate_if_conditions(&config);
-        assert!(result.is_err(), "expected Err for if.fail in after-pr");
-        let msg = err_string(result);
+        let result = validate_config(&config);
         assert!(
-            msg.contains("after-pr") || msg.contains("notify"),
-            "error should mention after-pr step, got: {msg}"
+            result.is_ok(),
+            "expected an after-pr command jump to validate: {result:?}"
         );
     }
 

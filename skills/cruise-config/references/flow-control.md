@@ -164,7 +164,7 @@ steps:
 
 ### Constraints on `if.fail`
 
-- In `after-pr`, `if.fail` is supported only on the native `squash-merge: true` step; it is rejected on every other after-PR step.
+- In `after-pr`, `if.fail` is supported only as a named jump on command steps and on the native `squash-merge: true` step; prompt steps and `{ retry: true }` are rejected there.
 - On the native step, GitHub's confirmed behind/diverged base ancestry or `CONFLICTING`/`DIRTY` mergeability can route to `if.fail`; other readiness failures remain errors. The built-in `follow-up/sync-base` handler runs sync-base → resolve-conflict → push-after-sync → wait-ci → fix-ci-error. Only native `ResyncRequired` routing from `squash-merge` to its `if.fail` target starts a fresh after-PR pass: it resets `budgeted_traversals` for every after-PR edge except `squash-merge` → target and clears group retry counts, preserving edge traversal history. The resync edge remains capped at `max_retries`; generic `if.fail` retains shared budgets. Worst case: up to `max_retries` resyncs, each pass allowing up to `max_retries - 1` CI-fix iterations; zero retry budget permits no resync. This GitHub-only ancestry check does not change GitLab behavior.
 - Cannot be used in a group-level `if:`.
 - With `if.fail` set, recoverable prompt-step errors are caught and routed to the handler instead of aborting the workflow. Missing-model errors from jcode prompts bypass the handler and abort the workflow.

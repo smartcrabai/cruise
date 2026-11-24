@@ -82,12 +82,27 @@ after-pr:
 
 `tdd` and `research` share the ordered prelude `pr-ready` →
 `sync-base` → `resolve-conflict` → `push-after-sync` → `wait-ci` →
-`fix-ci-error`. Each caller passes its conflict prompt and task-specific scope
+`rerun-unacquired-ci` → `fix-ci-error`. Each caller passes its conflict prompt and task-specific scope
 into the shared resource, which owns the common CI repair prompt. `wait-ci`
 allows up to 60 minutes. For a confirmed current-head GitHub conflict, it exits promptly after validating the commit and rollup unless CI reports a failure. Failed CI retains its diagnostic and repair path, including waiting for running Actions suites. A stale PR head still observes the propagation grace period. If CI is still running at its deadline with no failed
 rollup, it reports pending without invoking repair. If a GitHub rollup is
 already failing, `wait-ci` keeps polling attached Actions suites until they
 finish or the deadline; the deadline preserves the failure and invokes repair.
+
+On a CI failure, `rerun-unacquired-ci` (`{cruise.bin} internal
+rerun-unacquired-ci`, `next: wait-ci`, `if.fail: fix-ci-error`) reruns the
+failed jobs with `gh run rerun --failed` only when every failed check is a
+GitHub Actions job that no runner acquired. The host confirms this through the
+API (conclusion `cancelled`, no runner, no steps, and the check-run failure
+annotation `The job was not acquired by Runner ...`) and records it in the
+evidence as `Runner unacquired (host-verified)`. It reruns at most
+`ci_unacquired_rerun_max_attempts` times per PR head (application config,
+default `2`, `0` disables; set with `cruise config
+--set-ci-unacquired-rerun-max-attempts <N>`), counted in
+`ci-followup/unacquired-reruns.json` in the session so resuming never
+recounts. Mixed failures, other forges, a spent limit, or any refusal go to
+`fix-ci-error` unchanged; mixed failures are not rerun because a repair pushes
+a new head and `--failed` would also rerun the genuine failures.
 
 On failure, `fix-ci-error` receives the prior wait diagnostic, enumerates all
 non-success checks for the current head, and reads logs (including canceled or
@@ -126,7 +141,7 @@ after-pr:
 
 `squash-merge: true` is valid only on the final direct step in `after-pr`, with exactly `flag: merge` (a single-name string or one-element list). It is forbidden in the main workflow, group definitions or calls, workflow calls, and parallel parents or children. Do not add `prompt`, `prompt_file`, `command`, `option`, `output_file`, `model`, `computer_use`, `permission`, or `allow_commit`; compatible common fields such as `env`, `timeout`, `skip`, and `when` may be used. The timeout bounds the synchronous operation.
 
-`if.fail` is supported in `after-pr` only on the native `squash-merge: true` step; it remains invalid on every other after-PR step. In the built-ins, this handler routes confirmed GitHub behind/diverged ancestry or `CONFLICTING`/`DIRTY` mergeability into the existing recovery path. It does not make other readiness failures retryable.
+`if.fail` is supported in `after-pr` only as a named jump on command steps and on the native `squash-merge: true` step; prompt steps and `{ retry: true }` remain invalid there. In the built-ins, the native handler routes confirmed GitHub behind/diverged ancestry or `CONFLICTING`/`DIRTY` mergeability into the existing recovery path. It does not make other readiness failures retryable.
 
 The native operation supports GitHub and GitLab and fails closed unless fresh provider state and local state are ready: the PR/MR must be open and non-draft, the worktree clean, local `HEAD` equal to the remote source head, applicable CI checks for that source head passed, required reviews and provider policy satisfied, and mergeability current. Pending, unknown, failed, or otherwise unfulfilled requirements reject the merge, except for the confirmed GitHub base-sync cases below. The merge request includes an expected-head guard so a head race cannot merge a different revision. It requests squash synchronously; it does not enable auto-merge, bypass protections/admin rules, use a merge queue, or request source-branch deletion. GitHub uses its synchronous REST merge endpoint via `gh api`, not `gh pr merge`; queues that cannot preserve synchronous squash semantics are rejected. A same-head PR/MR already merged is idempotently accepted without another write.
 
@@ -144,7 +159,7 @@ The existing **Merge PR** action in `cruise list` and the WebUI remains a separa
 
 - **After-PR errors:** without native merge opt-in, errors from ordinary `after-pr` steps are warnings except cancellation, missing jcode models, and `github-review` failures, which propagate. With native merge opted in, actual execution errors anywhere in the after-PR run, including before the native step, are fatal and suppress post-PR cleanup. A nonzero command exit status remains command-as-data under existing semantics; the native action independently rechecks current readiness instead of trusting command output.
 - **`if.no-file-changes` is forbidden**: rejected for the same reason.
-- **`if.fail`:** supported only on the native `squash-merge: true` step; rejected on all other `after-pr` steps.
+- **`if.fail`:** supported only as a named jump on command steps and on the native `squash-merge: true` step; rejected on prompt steps and as `{ retry: true }`.
 - **`if.head-changed`:** allowed on `after-pr` steps.
 
 Regular transition rules (`next` / `skip` / `when.exists` / `if.file-changed` / `if.head-changed`) work as usual.

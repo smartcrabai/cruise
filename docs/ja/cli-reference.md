@@ -412,6 +412,8 @@ Options:
           Set the UI language, or clear the saved setting with auto.
       --set-auto-requeue-max-attempts <N>
           Set the automatic retry limit for Run All (0 disables it).
+      --set-ci-unacquired-rerun-max-attempts <N>
+          Set the automatic reruns per PR head of GitHub Actions jobs no runner acquired (0 disables them).
 ```
 
 `$XDG_CONFIG_HOME/cruise/`（既定: `~/.config/cruise/`）に保存された `config.json` または `config.yaml` のアプリケーション設定を表示または更新します。workflow ごとの YAML 設定とは別のものです。flag なしでは現在の設定を出力します。`--set-parallelism <N>` は `run_all_parallelism`（既定 `1`）を設定し、**WebUI** の `run --all` で並行実行する session 数を制御します。CLI はこの保存値を読み込みません。1 回限りの値には `cruise run --all --parallelism <N>` を使ってください。
@@ -425,6 +427,8 @@ CLI の UI 言語は `CRUISE_UI_LANGUAGE` > アプリケーション `uiLanguage
 `cruise config` は設定済みの値を JSON value line で表示します（例: `languages = {"plan":"Japanese","pr":"English"}`、`commit_message_template = "{title} [{session_id}]"`、`pr_body_template = "## Summary\n{body}"`）。他のアプリケーション設定を更新しても、これらの値は保持されます。後から `default.yaml` やアプリケーション設定を編集しても、保存済み snapshot は変わりません。対応する workflow override 環境変数を明示的に送った CLI request では、その request の間だけメモリ上で override されますが、snapshot は書き換えません。
 
 `cruise config --set-auto-requeue-max-attempts <N>` は CLI と WebUI の Run All 用に `run_all_auto_requeue_max_attempts` を設定します。CLI の `--auto-requeue-max-attempts <N>` flag は 1 batch だけ上書きします。
+
+`cruise config --set-ci-unacquired-rerun-max-attempts <N>` は `ci_unacquired_rerun_max_attempts`（既定 `2`）を設定します。runner が取得されなかったことだけで失敗した GitHub Actions ジョブを、after-PR workflow が PR の HEAD ごとに何回まで再実行するかを指定します。`0` で無効になります。
 
 macOS で実行中にスリープさせないには、machine-level `config.yaml` に `prevent_sleep: true`（または `config.json` に `"prevent_sleep": true`）を設定します。既定値は `false` です。CLI と WebUI の run が対象ですが、計画だけの場合は対象外です。その他の OS では何もしません。変更は次の run から有効です。プロジェクト `default.yaml` ではこの設定をサポートしません。
 

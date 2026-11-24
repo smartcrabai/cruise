@@ -172,7 +172,7 @@ steps:
 `if.fail` は他の flow-control jump と同じ loop-protection budget（`--max-retries`、なければ top-level `max_retries`、それもなければ3）に従います。budget は user-skip fallback と group-retry-exhausted の exit を除く graph edge すべてを対象にします。そのため通常の順次遷移や明示的 `next`/option jump も数えられます。いずれか1 edge の通過回数が上限を超えると、設定ミスの loop が永続しないよう loop protection により run を停止します。
 
 **制約:**
-- group level と `squash-merge: true` の native step を除くすべての `after-pr` step では `if.fail` を拒否します。native `squash-merge: true` が受け付けるのは名前付き jump のみです。
+- group level では `if.fail` を拒否します。`after-pr` では、command step と native `squash-merge: true` の名前付き jump だけを受け付け、prompt step と `{ retry: true }` は拒否します。
 - 通常 step では `if.fail` を他の `if:` key（`file-changed`、`head-changed`、`no-file-changes`）と組み合わせられます。native squash-merge では名前付き `if.fail` 経路のみ受け付けます。
 
 <a id="quality-gates-quality_gates"></a>

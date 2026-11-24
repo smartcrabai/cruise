@@ -252,6 +252,15 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
             run_approved_ci_verifier,
         ),
         Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::RerunUnacquiredCi,
+        })) => ci_followup::rerun_unacquired(
+            &std::env::current_dir()?,
+            &path_from_env("CRUISE_AFTER_PR_PLAN")?,
+            &text_from_env("CRUISE_AFTER_PR_NUMBER")?,
+            &text_from_env("CRUISE_AFTER_PR_URL")?,
+            app_config::AppConfig::load_runtime()?.ci_unacquired_rerun_max_attempts,
+        ),
+        Some(cli::Commands::Internal(cli::InternalArgs {
             command: cli::InternalCommand::JcodePreTool,
         })) => unreachable!("jcode pre-tool gate exits before runtime initialization"),
         #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]

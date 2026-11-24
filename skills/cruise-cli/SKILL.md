@@ -121,6 +121,7 @@ Constraints and gotchas:
 | Run all planned or suspended sessions with bounded concurrency (one run) | `cruise run --all --parallelism 4` |
 | Retry eligible Run All failures once (one run) | `cruise run --all --auto-requeue-max-attempts 1` |
 | Set the shared Run All retry limit | `cruise config --set-auto-requeue-max-attempts 1` |
+| Set how often after-PR reruns GitHub jobs no runner acquired, per PR head (default 2, 0 disables) | `cruise config --set-ci-unacquired-rerun-max-attempts 2` |
 | Browse, approve, resume, or delete sessions interactively | `cruise list` |
 | Have Cruise split a repository goal into child sessions and publish one PR/MR (experimental) | `cruise manager say "goal"`, `cruise manager propose`, then `cruise manager approve` (see [Experimental Manager](#experimental-manager-repository-goals)) |
 | Inspect Manager goals, proposals, or pending child prompts | `cruise manager status [--json]` |
@@ -280,6 +281,15 @@ exact CI commands. Empty or truncated diagnostics fall back to provider
 queries. It fixes all in-scope failures in one pass and runs matching
 formatters, linters, and tests before commit. Unrelated/flaky jobs are rerun
 once or reported clearly; no-change repairs do not loop.
+
+Before that prompt, `follow-up/rerun-unacquired-ci` handles GitHub failures
+made only of Actions jobs that no runner acquired (API-verified: conclusion
+`cancelled`, no runner, no steps, failure annotation `The job was not acquired
+by Runner ...`). It runs `gh run rerun --failed` and returns to `wait-ci`, up
+to `ci_unacquired_rerun_max_attempts` times per PR head (default `2`), counted
+in the session so resuming does not recount. Mixed failures, GitLab, or a
+spent limit go to the repair prompt as before; at the limit the run stops
+unmerged with a message naming the setting.
 
 At merge time, GitHub's compare API checks whether the PR includes the current base. Only confirmed behind/diverged ancestry or `CONFLICTING`/`DIRTY` mergeability routes the built-in `squash-merge` through `follow-up/sync-base` → `sync-base` → `resolve-conflict` → `push-after-sync` → `wait-ci` → `fix-ci-error`. Only native `ResyncRequired` routing from `squash-merge` to its `if.fail` target starts a fresh after-PR pass: it resets `budgeted_traversals` for every after-PR edge except `squash-merge` → target and clears group retry counts, preserving edge traversal history. The resync edge remains capped at `max_retries`; generic `if.fail` retains shared budgets. Worst case: up to `max_retries` resyncs, each pass allowing up to `max_retries - 1` CI-fix iterations; zero retry budget permits no resync. Other readiness failures still fail. This ancestry check and recovery are GitHub-only; GitLab behavior is unchanged.
 
