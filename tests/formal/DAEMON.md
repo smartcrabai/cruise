@@ -72,7 +72,8 @@ by `tests/daemon_bdd.rs`, drives the shipped CLI and real listener. It covers
 `cruise list --json`, registry-removal shutdown, default-port fallback,
 explicit-port failure, stale registry-version handling, and bearer-token checks
 for `GET /api/v1/status` and `POST /api/v1/shutdown`. The port fallback scenario
-holds `127.0.0.1:8484` when available (or uses an existing occupant); the strict
+holds `127.0.0.1:8484` when available (or uses an existing occupant, retrying when
+that occupant releases the port before the daemon binds it); the strict
 port scenario holds a dynamically allocated port. Integration tests in
 `tests/daemon_lifecycle.rs` and `tests/daemon_control.rs` retain the named
 process-identity, stale-record, lock, shutdown, API-authentication, proxy, and

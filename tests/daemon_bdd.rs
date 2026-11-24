@@ -310,21 +310,33 @@ fn exits_after_registry_removal(w: &mut DaemonWorld) -> TestResult {
 
 #[when("I start the daemon without a port while the default port is busy")]
 fn start_with_busy_default(w: &mut DaemonWorld) -> TestResult {
-    match TcpListener::bind(("127.0.0.1", 8484)) {
-        Ok(listener) => w.reserved_listener = Some(listener),
-        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
-        Err(error) => return Err(error.into()),
+    // Another process (a concurrently running test's autostarted daemon) may hold
+    // the default port and release it before `daemon start` binds. Only then can
+    // the daemon get 8484, so retry; with the port reserved here it is a failure.
+    for _ in 0..5 {
+        w.reserved_listener = match TcpListener::bind(("127.0.0.1", 8484)) {
+            Ok(listener) => Some(listener),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => None,
+            Err(error) => return Err(error.into()),
+        };
+        let output = w.success(&["daemon", "start"])?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let record = w.record()?;
+        if w.reserved_listener.is_none() && record["port"] == 8484 {
+            w.success(&["daemon", "stop"])?;
+            continue;
+        }
+        assert!(
+            stderr.contains(
+                "warning: default daemon port 8484 is busy; using ephemeral port. Set --port or CRUISE_DAEMON_PORT explicitly on shared hosts."
+            ),
+            "port={} stderr={stderr}",
+            record["port"]
+        );
+        w.original = Some(record);
+        return Ok(());
     }
-    let output = w.success(&["daemon", "start"])?;
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains(
-            "warning: default daemon port 8484 is busy; using ephemeral port. Set --port or CRUISE_DAEMON_PORT explicitly on shared hosts."
-        ),
-        "{stderr}"
-    );
-    w.original = Some(w.record()?);
-    Ok(())
+    Err("default port 8484 kept changing hands; no stable occupant to test the fallback".into())
 }
 
 #[then("the daemon is registered on an ephemeral port")]
