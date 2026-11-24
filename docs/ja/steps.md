@@ -169,7 +169,7 @@ after-pr:
 
 `after-pr` の prompt step にも同じ既定の commit guard が適用されます。HEAD を進める必要がある after-PR prompt には個別に `allow_commit: true` を設定してください。
 
-組み込みの PR 後 prompt には commit、push、forge 操作を禁止します。ホストが検証した競合解消を commit し、対象 PR/MR の branch にだけ push します。CI 修復は現在の HEAD の証拠に基づき、ホスト verifier が実行可能な場合は正確な stage 済み修復を公開前に検証します。実行できない場合は Cruise が warning を表示し、ホスト検証なしで公開して push 先 HEAD の CI に依拠します。その後 CI を再確認し、session 内で同じ HEAD の対象ジョブを一度だけ再試行するか、マージせず停止します。停止した session を再実行すると、前回の判定を使い回さず現在の HEAD の CI を再確認します。native merge は準備状態を独立に確認します。
+組み込みの PR 後 prompt には commit、push、forge 操作を禁止します。ホストが検証した競合解消を commit し、対象 PR/MR の branch にだけ push します。CI 修復は現在の HEAD の証拠に基づき、ホスト verifier が実行可能な場合は正確な stage 済み修復を公開前に検証します。実行できない場合は Cruise が warning を表示し、ホスト検証なしで公開して push 先 HEAD の CI に依拠します。その後 CI を再確認し、session 内で同じ HEAD の対象ジョブを一度だけ再試行するか、マージせず停止します。停止した session を再実行すると、前回の判定を使い回さず現在の HEAD の CI を再確認します。native merge は準備状態を独立に確認します。GitHub で、check が queued や実行中のまま（runner 待ちのジョブなど）`wait-ci` が55分の期限に達した場合も、native merge は待ち続けます。現在の HEAD の CI が pending のポーリングごとに10分の readiness 予算を数え直し、merge step の開始から最大60分まで延ばします。CI の失敗、conflict、レビューの要求ではこれまでどおりすぐに待ちを終え、それ以外の pending（mergeability が不明、CI 未登録）は10分の上限のままです。
 
 競合解消を commit する前に、ホストは記録した競合 path 以外の tracked file の編集と、ignore されていない untracked path の追加・削除を拒否します。ignore された path は比較しません。ホストは競合 path だけを stage するため ignore された file が commit に入ることはなく、resolver の検証は `node_modules/.vitest-cache` や `tsconfig.tsbuildinfo` などの ignore された cache を作成・更新・削除して構いません。
 

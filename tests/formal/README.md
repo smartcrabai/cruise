@@ -60,7 +60,10 @@ aborted merge is never committed), exact CI repair checks,
 one retry per head, a resumable CI repair
 `wait`, host reruns of failures made only of jobs no runner acquired (at most
 `MAX_RERUNS` per head, never for genuine or mixed failures, kept across
-resume), and read-only native merge admission. Quint 0.33.1 passes 32 witnesses and 1,000 seeded executions
+resume), read-only native merge admission, and the native merge's bounded
+wait for slow CI (a poll that sees current-head CI still pending restarts the
+readiness budget, at most `CI_PENDING_POLLS` times; a CI failure still stops).
+Quint 0.33.1 passes 38 witnesses and 1,000 seeded executions
 of up to 13 transitions; Apalache 0.62.1 found no violation through 11
 transitions. The finite model does not prove the Rust implementation or provider APIs.
 

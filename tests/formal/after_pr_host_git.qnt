@@ -15,7 +15,8 @@ module after_pr_host_git {
     failureKind: int, unacquiredReruns: int -> int,
     readinessHead: int, readinessAsserted: bool, readinessReadOnly: bool,
     readinessBehind: bool, readinessConflict: bool,
-    nativeMerged: bool, waiting: bool
+    nativeMerged: bool, waiting: bool,
+    mergeCiPolls: int, mergeReadinessPolls: int
   }
   var s: State
   var before: State
@@ -30,6 +31,11 @@ module after_pr_host_git {
   // The host reruns kind 1 at most MAX_RERUNS times per head, counted
   // pre-request in session state that resuming keeps.
   pure val MAX_RERUNS = 2
+  // Native merge readiness: a budget of READINESS_POLLS non-ready polls,
+  // restarted by each poll that sees current-head CI still queued or running,
+  // for at most CI_PENDING_POLLS such polls.
+  pure val READINESS_POLLS = 1
+  pure val CI_PENDING_POLLS = 2
   pure val initial: State = {
     phase: 0, remoteHead: 0, remoteTree: 0,
     workspaceHead: 0, workspaceParentHead: 0, workspaceTree: 0,
@@ -44,7 +50,8 @@ module after_pr_host_git {
     failureKind: -1, unacquiredReruns: Map(0 -> 0, 1 -> 0, 2 -> 0),
     readinessHead: -1, readinessAsserted: false, readinessReadOnly: false,
     readinessBehind: false, readinessConflict: false,
-    nativeMerged: false, waiting: false
+    nativeMerged: false, waiting: false,
+    mergeCiPolls: 0, mergeReadinessPolls: 0
   }
   action init = all { s' = initial, before' = initial, event' = "init" }
   action record(updated: State, name: str): bool = all {
@@ -67,7 +74,8 @@ module after_pr_host_git {
   action startWaitCI = all {
     s.phase == 1, s.bindingTrusted, s.bindingHead == s.remoteHead,
     s.workspaceHead == s.remoteHead, s.workspaceTree == s.remoteTree,
-    record({ ...s, phase: 4, ciGreen: false }, "waitCI") }
+    record({ ...s, phase: 4, ciGreen: false, mergeCiPolls: 0,
+      mergeReadinessPolls: 0 }, "waitCI") }
   action ciPass = all {
     s.phase == 4, s.bindingTrusted, s.bindingHead == s.remoteHead,
     s.workspaceHead == s.remoteHead, s.workspaceTree == s.remoteTree,
@@ -252,6 +260,27 @@ module after_pr_host_git {
     record({ ...s, readinessHead: observedHead,
       readinessAsserted: false, readinessReadOnly: false,
       readinessBehind: behind, readinessConflict: conflict }, "readinessRejected") }
+  // wait-ci reached its deadline with CI still pending; native merge polls.
+  action mergeSeesPendingCI = all {
+    s.phase == 4, not(s.ciGreen), s.bindingTrusted,
+    s.bindingHead == s.remoteHead, s.mergeCiPolls < CI_PENDING_POLLS,
+    record({ ...s, mergeCiPolls: s.mergeCiPolls + 1,
+      mergeReadinessPolls: 0 }, "mergeCiPending") }
+  // Unknown mergeability, or CI still pending past its limit, spends the
+  // readiness budget.
+  action mergeSpendsReadinessBudget = all {
+    s.phase == 4, s.bindingTrusted,
+    s.ciGreen or s.mergeCiPolls == CI_PENDING_POLLS,
+    s.mergeReadinessPolls < READINESS_POLLS,
+    record({ ...s, mergeReadinessPolls: s.mergeReadinessPolls + 1 },
+      "mergeReadinessPoll") }
+  def mergeBudgetLeft(st: State): bool =
+    st.mergeReadinessPolls < READINESS_POLLS
+      or (not(st.ciGreen) and st.mergeCiPolls < CI_PENDING_POLLS)
+  action mergeReadinessTimeout = all {
+    s.phase == 4, s.bindingTrusted, not(mergeBudgetLeft(s)),
+    record({ ...s, phase: 10, blockedAt: s.publications },
+      "mergeReadinessTimeout") }
   action nativeMerge = all {
     s.phase == 8, s.readinessAsserted, s.readinessReadOnly,
     not(s.readinessBehind), not(s.readinessConflict),
@@ -272,7 +301,8 @@ module after_pr_host_git {
     nondet kind = Set(0, 1, 2).oneOf()
     any {
       bindCurrent(observed), syncWorkspace, startWaitCI, ciPass, ciFail(kind),
-      rerunUnacquired,
+      rerunUnacquired, mergeSeesPendingCI, mergeSpendsReadinessBudget,
+      mergeReadinessTimeout,
       observeConflict(paths), resolverIgnoredChurn, resolverStrayUntracked,
       commitConflict(paths, tree), pushConflict,
       abortConflictMerge, localEdit, resumeAbortedConflict,
@@ -302,6 +332,12 @@ module after_pr_host_git {
     s.retriedHeads == s.retriedHeads.intersect(Set(0, 1, 2)),
     Set(-1, 0, 1, 2, 3).contains(s.retryOutcome),
     Set(-1, 0, 1, 2).contains(s.readinessHead),
+    0.to(CI_PENDING_POLLS).contains(s.mergeCiPolls),
+    0.to(READINESS_POLLS).contains(s.mergeReadinessPolls),
+    // Slow CI never times out the merge while its wait limit remains.
+    event == "mergeReadinessTimeout" implies (s.phase == 10
+      and not(s.nativeMerged) and s.publications == before.publications
+      and (before.ciGreen or before.mergeCiPolls == CI_PENDING_POLLS)),
     s.phase == 10 implies s.publications == s.blockedAt,
     s.waiting implies s.phase == 10,
     s.evidenceStatus == 2 implies s.phase == 10,
@@ -559,4 +595,24 @@ module after_pr_host_git {
   run abortedMergeCannotBeCommittedTest = init.then(bindCurrent(0))
     .then(observeConflict(1)).then(abortConflictMerge)
     .then(commitConflict(1, 1)).fail()
+  run slowCiPastReadinessBudgetMergesTest = init.then(bindCurrent(0))
+    .then(startWaitCI).then(mergeSeesPendingCI).then(mergeSeesPendingCI)
+    .then(ciPass).then(assertReadiness(0, false, false)).then(nativeMerge)
+    .expect(s.nativeMerged and s.mergeCiPolls == CI_PENDING_POLLS and safety)
+  run pendingCiCannotTimeOutBeforeLimitTest = init.then(bindCurrent(0))
+    .then(startWaitCI).then(mergeSeesPendingCI).then(mergeReadinessTimeout).fail()
+  run pendingCiTimesOutAtLimitTest = init.then(bindCurrent(0))
+    .then(startWaitCI).then(mergeSeesPendingCI).then(mergeSeesPendingCI)
+    .then(mergeSpendsReadinessBudget).then(mergeReadinessTimeout)
+    .expect(s.phase == 10 and not(s.nativeMerged) and safety)
+  run pendingCiLimitIsBoundedTest = init.then(bindCurrent(0))
+    .then(startWaitCI).then(mergeSeesPendingCI).then(mergeSeesPendingCI)
+    .then(mergeSeesPendingCI).fail()
+  run ciFailureAfterSlowCiStopsTest = init.then(bindCurrent(0))
+    .then(startWaitCI).then(mergeSeesPendingCI).then(ciFail(0))
+    .expect(s.phase == 5 and not(s.nativeMerged) and safety)
+  run unknownMergeabilityKeepsReadinessBudgetTest = init.then(bindCurrent(0))
+    .then(startWaitCI).then(ciPass).then(mergeSpendsReadinessBudget)
+    .then(mergeReadinessTimeout)
+    .expect(s.phase == 10 and not(s.nativeMerged) and safety)
 }
