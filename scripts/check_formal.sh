@@ -53,13 +53,13 @@ reservation.listen(0, '127.0.0.1', () => {
   reservation.close(() => {
     const endpoint = `127.0.0.1:${port}`;
     console.log(`Isolated Apalache 0.62.1 endpoint: ${endpoint}`);
-    const args = [process.argv[2], 'verify', process.argv[3],
+    const args = ['verify', process.argv[3],
       '--main', process.argv[5], '--init', 'init', '--step', 'step',
       '--invariant', 'safety', '--invariants', ...process.argv[6].split(','),
       '--max-steps', '12', '--backend', 'apalache', '--apalache-version', '0.62.1',
       '--server-endpoint', endpoint, '--out-itf', process.argv[4]];
-    console.log(`Command argv: ${JSON.stringify([process.execPath, ...args])}`);
-    const child = spawn(process.execPath, args, { stdio: 'inherit' });
+    console.log(`Command argv: ${JSON.stringify([process.argv[2], ...args])}`);
+    const child = spawn(process.argv[2], args, { stdio: 'inherit' });
     child.on('error', error => { console.error(error); process.exitCode = 1; });
     child.on('exit', (code, signal) => {
       if (signal) console.error(`Quint terminated by ${signal}`);

@@ -9,15 +9,18 @@ reservation.on('error', error => { console.error(error); process.exitCode = 1; }
 reservation.listen(0, '127.0.0.1', () => {
   const endpoint = `127.0.0.1:${reservation.address().port}`;
   reservation.close(() => {
-    const args = [path.resolve(quint), 'verify', '--invariant', 'safety', '--max-steps', steps,
+    // Run the Quint executable itself so npm bin links and version-manager
+    // shims (e.g. mise) both work; `node <shim>` cannot parse a shim.
+    const bin = path.resolve(quint);
+    const args = ['verify', '--invariant', 'safety', '--max-steps', steps,
       '--main', main, '--init', 'init', '--step', 'step', '--backend', 'apalache',
       '--apalache-version', '0.62.1', '--server-endpoint', endpoint,
       '--out-itf', path.resolve(output), path.resolve(model)];
     console.log(`Apalache 0.62.1, bounded at ${steps} transitions`);
-    console.log(`Command argv: ${JSON.stringify([process.execPath, ...args])}`);
+    console.log(`Command argv: ${JSON.stringify([bin, ...args])}`);
     // Keep Apalache's own _apalache-out logs inside this run's report folder,
     // rather than creating untracked state in the project root.
-    const child = spawn(process.execPath, args, {
+    const child = spawn(bin, args, {
       stdio: 'inherit', cwd: path.dirname(path.resolve(output)),
     });
     child.on('error', error => { console.error(error); process.exitCode = 1; });
