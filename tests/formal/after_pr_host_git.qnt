@@ -9,6 +9,7 @@ module after_pr_host_git {
     evidenceNoEgress: bool, evidenceIndexClean: bool,
     bindingHead: int, bindingTrusted: bool,
     initialConflictPaths: int, committedPaths: int, strayUntracked: bool,
+    conflictRecorded: bool, mergeActive: bool, localChanges: bool,
     publications: int, blockedAt: int,
     ciGreen: bool, retriedHeads: Set[int], retryHead: int, retryOutcome: int,
     failureKind: int, unacquiredReruns: int -> int,
@@ -37,6 +38,7 @@ module after_pr_host_git {
     evidenceNoEgress: false, evidenceIndexClean: false,
     bindingHead: -1, bindingTrusted: false,
     initialConflictPaths: 0, committedPaths: 0, strayUntracked: false,
+    conflictRecorded: false, mergeActive: false, localChanges: false,
     publications: 0, blockedAt: 0,
     ciGreen: false, retriedHeads: Set(), retryHead: -1, retryOutcome: -1,
     failureKind: -1, unacquiredReruns: Map(0 -> 0, 1 -> 0, 2 -> 0),
@@ -49,12 +51,15 @@ module after_pr_host_git {
     before' = s, s' = updated, event' = name }
 
   // The observed PR head must match the remote before the binding is trusted.
+  // Base sync refuses an active merge and replaces any earlier sync record.
   action bindCurrent(observedHead: int): bool = all {
     (s.phase == 0 or s.phase == 4), observedHead == s.remoteHead,
+    not(s.mergeActive),
     record({ ...s, phase: 1, bindingHead: observedHead,
       bindingTrusted: true, readinessAsserted: false,
       readinessReadOnly: false, readinessHead: -1,
-      readinessBehind: false, readinessConflict: false }, "bind") }
+      readinessBehind: false, readinessConflict: false,
+      conflictRecorded: false }, "bind") }
   action syncWorkspace = all {
     s.phase == 1, s.bindingTrusted, s.bindingHead == s.remoteHead,
     record({ ...s, workspaceHead: s.remoteHead,
@@ -89,7 +94,8 @@ module after_pr_host_git {
     s.workspaceHead == s.remoteHead, s.workspaceTree == s.remoteTree,
     Set(1, 2, 3).contains(paths),
     record({ ...s, phase: 2, initialConflictPaths: paths,
-      committedPaths: 0, strayUntracked: false }, "conflict") }
+      committedPaths: 0, strayUntracked: false, conflictRecorded: true,
+      mergeActive: true, localChanges: false }, "conflict") }
   // Resolver verification may create, rewrite, or prune ignored caches. The
   // host stages only conflict paths, so this never reaches the commit.
   action resolverIgnoredChurn = all {
@@ -98,12 +104,30 @@ module after_pr_host_git {
   action resolverStrayUntracked = all {
     s.phase == 2, record({ ...s, strayUntracked: true }, "strayUntracked") }
   action commitConflict(paths: int, tree: int): bool = all {
-    s.phase == 2, s.bindingTrusted, s.bindingHead == s.remoteHead,
+    s.phase == 2, s.mergeActive, s.bindingTrusted, s.bindingHead == s.remoteHead,
     s.workspaceHead == s.remoteHead, s.remoteHead < 2, not(s.strayUntracked),
     paths == s.initialConflictPaths, Set(0, 1, 2, 3).contains(tree),
     record({ ...s, phase: 3, workspaceParentHead: s.remoteHead,
       workspaceHead: s.remoteHead + 1, workspaceTree: tree,
-      committedPaths: paths }, "conflictCommit") }
+      committedPaths: paths, conflictRecorded: false, mergeActive: false },
+      "conflictCommit") }
+  // An operator aborts the recorded merge; the checkout returns to its
+  // pre-merge HEAD and tree while the conflict record stays.
+  action abortConflictMerge = all {
+    Set(2, 10).contains(s.phase), s.mergeActive,
+    record({ ...s, mergeActive: false }, "abortMerge") }
+  // A tracked or untracked, non-ignored change made after the abort.
+  action localEdit = all {
+    s.phase == 10, s.conflictRecorded, not(s.mergeActive),
+    record({ ...s, localChanges: true }, "localEdit") }
+  // Resuming a failed conflict commit whose merge was aborted on an untouched
+  // checkout restarts at base sync, which must bind the PR head again.
+  action resumeAbortedConflict = all {
+    s.phase == 10, not(s.waiting), s.conflictRecorded, not(s.mergeActive),
+    not(s.localChanges), s.workspaceHead == s.remoteHead,
+    record({ ...s, phase: 0, bindingHead: -1, bindingTrusted: false,
+      initialConflictPaths: 0, strayUntracked: false,
+      conflictRecorded: false }, "resumeAbortedConflict") }
   // This models a scoped branch push of precisely the initially conflicted paths.
   action pushConflict = all {
     s.phase == 3, s.bindingTrusted, s.bindingHead == s.remoteHead,
@@ -251,6 +275,7 @@ module after_pr_host_git {
       rerunUnacquired,
       observeConflict(paths), resolverIgnoredChurn, resolverStrayUntracked,
       commitConflict(paths, tree), pushConflict,
+      abortConflictMerge, localEdit, resumeAbortedConflict,
       suggestRepair(tree), verifyCandidate(observed, tree, flag, flag),
       failedVerification(observed, tree, flag, flag), unresolvedEvidence,
       pushRepair, workspaceDrift(tree), advanceRemote(nextHead, tree),
@@ -384,6 +409,14 @@ module after_pr_host_git {
       and s.publications == before.publications and not(s.nativeMerged)),
     event == "resumeWait" implies (before.phase == 10 and before.waiting
       and s.phase == 4 and not(s.bindingTrusted) and not(s.ciGreen)
+      and s.publications == before.publications),
+    s.mergeActive implies s.conflictRecorded,
+    event == "conflictCommit" implies before.mergeActive,
+    event == "resumeAbortedConflict" implies (before.phase == 10
+      and not(before.waiting) and before.conflictRecorded
+      and not(before.mergeActive)
+      and not(before.localChanges) and before.workspaceHead == before.remoteHead
+      and s.phase == 0 and not(s.bindingTrusted) and not(s.conflictRecorded)
       and s.publications == before.publications)
   }
 
@@ -512,4 +545,18 @@ module after_pr_host_git {
     .then(rerunUnacquired)
     .expect(s.unacquiredReruns.get(0) == MAX_RERUNS
       and s.unacquiredReruns.get(1) == 1 and safety)
+  run abortedConflictResyncsFromBaseTest = init.then(bindCurrent(0))
+    .then(observeConflict(1)).then(hardError).then(abortConflictMerge)
+    .then(resumeAbortedConflict).then(bindCurrent(0)).then(observeConflict(2))
+    .then(commitConflict(2, 1)).then(pushConflict)
+    .expect(s.phase == 4 and s.publications == 1
+      and s.committedPaths == 2 and safety)
+  run activeConflictMergeKeepsItsRecordTest = init.then(bindCurrent(0))
+    .then(observeConflict(1)).then(hardError).then(resumeAbortedConflict).fail()
+  run abortedConflictWithLocalChangesStaysFailedTest = init.then(bindCurrent(0))
+    .then(observeConflict(1)).then(hardError).then(abortConflictMerge)
+    .then(localEdit).then(resumeAbortedConflict).fail()
+  run abortedMergeCannotBeCommittedTest = init.then(bindCurrent(0))
+    .then(observeConflict(1)).then(abortConflictMerge)
+    .then(commitConflict(1, 1)).fail()
 }

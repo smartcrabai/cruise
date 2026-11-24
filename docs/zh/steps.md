@@ -171,6 +171,8 @@ after-pr:
 
 提交冲突修复之前，宿主会拒绝对记录的冲突路径以外的已跟踪文件所做的修改，以及任何未被忽略的未跟踪路径的新增或删除。被忽略的路径不参与比较：宿主只暂存冲突路径，被忽略的文件不会进入提交，因此解决者的检查可以创建、改写或清理 `node_modules/.vitest-cache`、`tsconfig.tsbuildinfo` 等被忽略的缓存。
 
+如果 `push-after-sync` 失败后又中止了冲突中的合并（`git merge --abort`），再次运行该会话时，after-PR 会从 `sync-base` 重新开始，而不会重试需要已记录 `MERGE_HEAD` 的提交。仅当工作树位于记录的 PR 分支、处于合并前的 HEAD，且没有进行中的合并、未合并路径、已跟踪文件的修改或未被忽略的未跟踪路径时才会这样做；否则会话仍像以前一样失败。新的同步会重新记录冲突，并再次运行解决者。
+
 在 GitHub 上，如果所有失败的检查都是因为没有运行器领取而被 GitHub 取消的 Actions 作业，内置的 `rerun-unacquired-ci` 步骤会重新运行失败的作业（`gh run rerun --failed`），并在不调用修复提示的情况下返回 `wait-ci`。宿主通过 API 逐个确认此类作业：conclusion 为 `cancelled`、未分配运行器、没有步骤，且检查运行带有失败注释 `The job was not acquired by Runner ...`。CI 证据会将其记录为 `Runner unacquired (host-verified)`。如果混有真正的失败，仍由修复提示照常处理，不会自动重新运行：修复会推送新的 HEAD 并重新触发 CI，而 `--failed` 也会重新运行真正的失败作业。每个 PR HEAD 最多重新运行 `ci_unacquired_rerun_max_attempts` 次（默认 `2`，`0` 表示禁用），次数保存在会话中，恢复会话不会重新计数。达到上限后，修复提示会收到证据并返回 `wait`，运行随即停止且不合并，并给出指明该上限的消息。这些重新运行同样消耗工作流 `max_retries` 的边预算。GitLab 不受影响。在此步骤出现之前创建的会话沿用其保存的 after-PR 步骤，不会自动重新运行。
 
 `require_bubblewrap: true` 和守护进程环境变量 `CRUISE_JCODE_BUBBLEWRAP=1` 会请求使用 Linux jcode Bubblewrap 隔离。Cruise 每个进程只探测一次可用性。如果构建未启用 `jcode-bubblewrap`、宿主不是 Linux，或探测失败，该步骤会在未隔离的情况下运行并显示警告。`command:` 后端不会被拒绝；它会在未隔离的情况下运行并显示警告。成功探测后 Bubblewrap 启动失败，仍会使本次尝试失败。内置冲突修复、CI 修复和评审提示会保留 `require_bubblewrap: true`，因此在可能时会使用隔离。
