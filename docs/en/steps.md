@@ -31,6 +31,8 @@ steps:
 
 When `output_file` is set, cruise saves the completed backend response in the session's `artifacts/` directory outside the workspace. Later prompt bodies can read it with `{file:initial-state.md}`.
 
+`advisor: true` marks a top-level prompt as a [read-only advisor step](sdk.md#advisor-steps) and requires `output_file`.
+
 An `instruction` is a message shown to the user immediately before a step runs, not a system prompt. If `{input}` is empty, the message is used as a multiline input prompt and the submitted text becomes `{input}`; otherwise it is displayed without being sent to the LLM.
 
 Prompt steps are commit-guarded by default. SDK prompts also receive the implicit Git shell denials described under [Tool restrictions](sdk.md#tool-restrictions). `allow_commit: true` removes those denials and the guard, but not explicit `disallowed_tools`, and never grants broader permissions. Set it only when a prompt intentionally needs to create a commit or otherwise move Git `HEAD`; omitted and `false` values keep the guard enabled. The guard covers classic `command:` mode and `sdk: jcode`, while command and option steps remain unaffected.
@@ -220,6 +222,8 @@ The default `reviewers: bots` preserves this behavior and requires a nonempty, u
 ## Variable Reference
 
 Commit and PR templates use a separate [allowed vocabulary](configuration.md#commit-and-pr-templates), which does not include `{plan}`. The `{plan}` below remains a session plan file path.
+
+Advisor steps leave `{prev.output}`, `{prev.stderr}`, and `{prev.input}` unchanged. To read advice, use `{file:<output_file>}` with the configured output artifact name.
 
 | Variable | Description |
 |----------|-------------|

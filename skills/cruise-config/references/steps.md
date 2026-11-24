@@ -152,6 +152,8 @@ Absolute and `~` paths refer to the local filesystem. In a GitHub-hosted
 workflow, relative non-URL values are resolved as paths in the remote directory; local
 `~` paths are rejected. A direct GitHub blob/raw URL can be used explicitly.
 
+`advisor: true` is allowed only on ordinary prompts under top-level `steps`, including inlined steps, not at call sites or inside groups, parallel blocks, or `after-pr`. It requires `output_file`, forbids `allow_commit: true`, and permits only omitted or explicit `read-only` permission. See [Advisor steps](sdk.md#advisor-steps).
+
 ### `instruction` is not a system prompt
 
 `instruction` is a message **displayed to the user** (after variable resolution) just before the step runs. It is never sent to the LLM. It additionally doubles as an interactive input prompt: when `{input}` is currently empty, the resolved instruction text is shown as a multiline input prompt and the user's entry becomes `{input}`.

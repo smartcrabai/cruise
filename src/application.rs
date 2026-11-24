@@ -4233,6 +4233,7 @@ impl CruiseApplication {
             &state,
             &config,
             execution_workspace_mode(&state, request.workspace_mode),
+            request.flags.as_ref().unwrap_or(&state.flags),
         )
     }
     /// Run one session while forwarding log events to an optional sink.
@@ -5213,6 +5214,7 @@ fn ensure_run_agent_auth(
     state: &SessionState,
     config: &crate::config::WorkflowConfig,
     workspace_mode: WorkspaceMode,
+    flags: &crate::flags::FlagValues,
 ) -> Result<()> {
     let execution_dir = match workspace_mode {
         WorkspaceMode::Worktree => manager.worktrees_dir().join(&state.id),
@@ -5220,7 +5222,10 @@ fn ensure_run_agent_auth(
     };
     crate::agent_auth::ensure_agents_authenticated(
         config,
-        crate::agent_auth::AuthScope::Execution,
+        crate::agent_auth::AuthScope::Execution {
+            flags,
+            skipped_steps: &state.skipped_steps,
+        },
         Some(&execution_dir),
     )
 }
@@ -5272,7 +5277,7 @@ fn setup_run_blocking(
     }
     let after_pr = state.execution_stage == crate::session::SessionExecutionStage::AfterPr;
     let workspace_mode = execution_workspace_mode(&state, options.requested_mode);
-    ensure_run_agent_auth(manager, &state, &config, workspace_mode)?;
+    ensure_run_agent_auth(manager, &state, &config, workspace_mode, &state.flags)?;
     let graph = prepare_run_graph(
         manager,
         id,
@@ -8481,6 +8486,107 @@ esac
             std::fs::read(session_dir.join("state.json")).unwrap_or_else(|e| panic!("{e}")),
             before
         );
+    }
+
+    #[test]
+    fn execution_auth_only_checks_enabled_unskipped_advisors() -> Result<()> {
+        use crate::test_support::EnvGuard;
+        fn flag_values(enabled: bool) -> crate::flags::FlagValues {
+            [("advisor".into(), enabled)].into_iter().collect()
+        }
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::tempdir()?;
+        let _home = isolate_application_config(temp.path());
+        let auth_home = temp.path().join("jcode");
+        let _auth_home = EnvGuard::set("JCODE_HOME", &auth_home);
+        let _skip = EnvGuard::remove("CRUISE_SKIP_AGENT_AUTH_CHECK");
+        let _anthropic_key = EnvGuard::remove("ANTHROPIC_API_KEY");
+        let _openai_key = EnvGuard::set("OPENAI_API_KEY", "test-normal-provider-key");
+        std::fs::create_dir(&auth_home)?;
+        std::fs::write(
+            auth_home.join("auth.json"),
+            r#"{"anthropic_accounts":[{"access":"expired","expires":1}]}"#,
+        )?;
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo)?;
+        crate::test_support::init_git_repo(&repo);
+        let manager = SessionManager::new(temp.path().join("data"));
+        let app = CruiseApplication::new(manager.clone());
+        let id = SessionManager::new_session_id();
+        let mut state = SessionState::new(
+            id.clone(),
+            repo,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
+            "auth test".into(),
+        );
+        state.phase = SessionPhase::Planned;
+        state.workspace_mode = WorkspaceMode::CurrentBranch;
+        manager.create(&state)?;
+        let session = manager.sessions_dir().join(&id);
+        std::fs::write(session.join("plan.md"), "# Auth test\n")?;
+        std::fs::write(
+            session.join("config.yaml"),
+            r"
+sdk: jcode
+model: openai/normal
+advisor_model: claude/advice
+flags:
+  advisor: {}
+steps:
+  ordinary:
+    prompt: Implement
+  inspect:
+    advisor: true
+    flag: advisor
+    prompt: Inspect
+    output_file: advice.md
+",
+        )?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        for (stored, requested, skip, rejected) in [
+            (false, None, false, false),
+            (true, None, true, false),
+            (true, None, false, true),
+            (true, Some(false), false, false),
+            (false, Some(true), false, true),
+        ] {
+            state.flags = flag_values(stored);
+            state.skipped_steps = if skip {
+                vec!["inspect".into()]
+            } else {
+                Vec::new()
+            };
+            manager.save(&state)?;
+            let request = RunRequest {
+                flags: requested.map(flag_values),
+                ..RunRequest::default()
+            };
+            let early = app.preflight_run_auth(&id, &request);
+            let setup = setup_run_blocking(
+                &manager,
+                runtime.handle(),
+                &id,
+                &CancellationToken::new(),
+                RunSetupOptions {
+                    flags_override: request.flags,
+                    ..RunSetupOptions::default()
+                },
+            )
+            .map(|_| ());
+            for result in [early, setup] {
+                if rejected {
+                    let error = result
+                        .err()
+                        .unwrap_or_else(|| panic!("expired advisor auth was accepted"));
+                    assert_eq!(error.telemetry_type(), "agent_auth_expired", "{error}");
+                } else {
+                    result?;
+                }
+            }
+        }
+        Ok(())
     }
 
     #[test]

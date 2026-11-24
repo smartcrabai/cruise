@@ -90,7 +90,7 @@ fails the load (see [steps.md](steps.md)).
 
 ## Workflow defaults (`default.yaml`)
 
-A `default.yaml` may set only `command`, `sdk`, `model`, `plan_model`, `subagent_model`,
+A `default.yaml` may set only `command`, `sdk`, `model`, `plan_model`, `advisor_model`, `subagent_model`,
 `max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`, `commit_message_template`, `pr_body_template`,
 `base_branch`, `auto_fetch`, `check_base_ci`,
 `force_exec`, `computer_use`, `permission`, `disallowed_tools`, `env`, `retry`, `formal_verify`, `mcp_servers`, and
@@ -250,6 +250,10 @@ steps:
 ## `plan_model`
 
 Model used by the built-in plan step (driven by `cruise plan`). Falls back to `model` if unset. In SDK mode it is a plain model reference (see [sdk.md](sdk.md)), or an array whose first entry is primary and remaining entries are fallbacks.
+
+## `advisor_model`
+
+Optional model for [advisor steps](sdk.md#advisor-steps). It has the same shape as `plan_model`: a string or ordered fallback array, with optional `disabled_during` on model objects. Workflow YAML overrides project defaults, which override user defaults. `CRUISE_ADVISOR_MODEL` overrides all three. This is not an application `cruise config` setting.
 
 ## `subagent_model`
 

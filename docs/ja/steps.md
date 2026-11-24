@@ -29,6 +29,8 @@ steps:
 
 `output_file` を設定すると、cruise は完了した backend response を workspace の外にある session の `artifacts/` directory に保存します。後続 prompt body から `{file:initial-state.md}` で読み取れます。
 
+`advisor: true` はトップレベルの prompt を[読み取り専用のアドバイザーステップ](sdk.md#advisor-steps)にします。`output_file` が必須です。
+
 `instruction` は step 実行直前にユーザーへ表示する message であり、system prompt ではありません。`{input}` が空の場合、message は複数行入力 prompt として使われ、送信されたテキストが `{input}` になります。それ以外の場合は表示されるだけで LLM には送られません。
 
 prompt step は既定で commit guard の対象です。SDK prompt には [`tool restrictions`](sdk.md#tool-restrictions) で説明する暗黙の Git shell 拒否も適用されます。`allow_commit: true` はこれらと guard を解除しますが、明示的な `disallowed_tools` は解除せず、権限を広げません。prompt が意図的に commit を作成する、または Git `HEAD` を動かす必要がある場合に限り `allow_commit: true` を設定してください。省略時および `false` では guard が有効です。guard は従来の `command:` mode と `sdk: jcode` を対象とします。command/option step には影響しません。

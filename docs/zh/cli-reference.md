@@ -224,6 +224,7 @@ Options:
 - `after_pr` 启用 after-PR 自动化，但不执行合并。
 - `merge` 选择相同的 after-PR 前置流程，并在最后执行原生同步 squash merge。在 GitHub 上，合并前会自动同步并恢复落后于 base 或存在冲突的 PR。GitLab 不执行此恢复。它不会启用自动合并、绕过策略或使用合并队列。
 - `formal_methods` 启用 workflow 级可执行 Quint、Alloy 和 Gherkin 规范及 CI；它不是初始计划模式。
+- `advisor` 在 `builtin:tdd` 完成实现后启用一次[只读顾问评审](sdk.md#advisor-steps)（仅限 jcode，默认关闭）。普通错误会跳过 `apply-advice`；成功时普通模型会检查一次建议，即使结果是 `NO FINDINGS`。
 
 `research` 仍为只读且 `create_pr: false`；`merge` 不会创建 PR，也不会覆盖该禁止创建 PR 的策略。如果因为未创建 PR 而无法执行已启用的 after-PR 操作（包括 `research`、`exec`、Current-branch 运行或没有提交的运行），Cruise 会跳过该操作并打印原因。
 

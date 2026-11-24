@@ -146,6 +146,8 @@ steps:
 <a id="failure-handling-iffail"></a>
 ### Failure の処理 (`if.fail`)
 
+[アドバイザーステップ](sdk.md#advisor-steps)で作業領域の変更を検出した場合、検証できない場合、またはユーザーが中断した場合は、`if.fail` に進まず実行を停止します。
+
 `if.fail` は回復可能な step failure が起きたときの処理を決めます。対象には command step の non-zero exit code、回復可能な prompt error（LLM transport error を含む）、`timeout`、`no-file-changes: failed` の発動があります。
 
 - **`fail: <step-name>`** — 指定した step にジャンプします。

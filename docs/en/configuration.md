@@ -59,7 +59,7 @@ After updating settings, retry the command that initiated the request: use `crui
 
 - `env` and `mcp_servers` merge per key (higher layer wins).
 - `command` and `sdk` form one pair: if a layer sets either, the lower layers' pair is ignored.
-- Other fields (`model`, `plan_model`, `subagent_model`, `max_retries`, `interactive_planning`, `cleanup_after_pr`, `force_exec`, `computer_use`, `permission`, `disallowed_tools`, `retry`, `formal_verify`, `commit_message_template`, `pr_body_template`) are taken from the highest layer that sets them. `languages.plan` and `languages.pr` are resolved independently; see [Prompt Languages](#prompt-languages). Restriction lists replace across layers; explicit workflow `disallowed_tools: []` clears inherited defaults.
+- Other fields (`model`, `plan_model`, `advisor_model`, `subagent_model`, `max_retries`, `interactive_planning`, `cleanup_after_pr`, `force_exec`, `computer_use`, `permission`, `disallowed_tools`, `retry`, `formal_verify`, `commit_message_template`, `pr_body_template`) are taken from the highest layer that sets them. `languages.plan` and `languages.pr` are resolved independently; see [Prompt Languages](#prompt-languages). Restriction lists replace across layers; explicit workflow `disallowed_tools: []` clears inherited defaults.
 - `base_branch`, `auto_fetch`, and `check_base_ci` are defaults-only keys, with project values overriding user values. For `--repo` sessions, the base-CI check reads user defaults only, not the cloned repository's project defaults. `auto_fetch: true` requires a nonempty `base_branch` after merging; `check_base_ci` defaults to `true`.
 - If defaults specify a backend (`command` / `sdk`) different from the workflow's, validation fails when they fill an unset backend-specific field (`model`, `retry`, `mcp_servers`, etc.). Set the field in the workflow or remove it from `default.yaml`.
 
@@ -106,6 +106,7 @@ model: sonnet             # default model for all prompt steps (optional)
 # In SDK mode, arrays use the first model, then fall back in order.
 # model: [sonnet, opus, gpt-5.5]
 plan_model: opus          # model used for the built-in plan step (optional)
+advisor_model: opus       # model used for advisor steps (optional)
 # subagent_model: claude/claude-haiku-4-5 # Jcode only: one plain model string
 languages:                # prompt languages (optional; defaults to English)
   pr: English             # language for auto-generated PR title/body
@@ -251,6 +252,7 @@ Process-level configuration overrides apply after workflow and defaults resoluti
 |---|---|---|
 | `CRUISE_MODEL` | `model` | model |
 | `CRUISE_PLAN_MODEL` | `plan_model` | model |
+| `CRUISE_ADVISOR_MODEL` | `advisor_model` | model |
 | `CRUISE_SUBAGENT_MODEL` | `subagent_model` | model entry |
 | `CRUISE_SDK` | `sdk` | text (`jcode` only) |
 | `CRUISE_COMMAND` | `command` | JSON array |

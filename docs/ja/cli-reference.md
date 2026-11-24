@@ -224,6 +224,7 @@ Git 管理されていないディレクトリでは警告を出してその場�
 - `after_pr` は merge なしで after-PR 自動処理を有効にします。
 - `merge` は同じ after-PR 前処理に加えて、最後にネイティブの同期 squash merge を有効にします。GitHub では base から遅れている PR や競合している PR を、merge 前に自動で同期・復旧します。GitLab ではこの復旧は行いません。auto-merge を有効化せず、policy を回避せず、merge queue も使いません。
 - `formal_methods` は workflow レベルの実行可能な Quint、Alloy、Gherkin 仕様と CI を有効にします。初期 plan mode ではありません。
+- `advisor` は `builtin:tdd` の実装後に[読み取り専用のアドバイザー確認](sdk.md#advisor-steps)を一度だけ実行します（jcode 専用、既定はオフ）。通常の失敗時は `apply-advice` を飛ばし、成功時は `NO FINDINGS` の場合も通常モデルが助言を一度確認します。
 
 `research` は `create_pr: false` の read-only workflow です。`merge` は PR を作成せず、no-PR policy を上書きしません。PR が作成されないため opt-in の after-PR 処理を利用できない場合（`research`、`exec`、current-branch run、commit のない run など）、Cruise は理由を表示してその処理をスキップします。
 

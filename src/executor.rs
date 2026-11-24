@@ -287,9 +287,13 @@ impl Executor {
             .working_dir
             .map_or_else(|| std::path::PathBuf::from("."), Path::to_path_buf);
         let mut tracker = crate::file_tracker::FileTracker::with_root(root);
-        tracker.take_snapshot(GUARD)?;
+        tracker.take_snapshot(GUARD).map_err(|error| {
+            CruiseError::ReadOnlyVerificationFailed(format!("before execution: {error}"))
+        })?;
         let result = self.dispatch(req, sandbox_access).await;
-        if tracker.has_files_changed(GUARD)? {
+        if tracker.has_files_changed(GUARD).map_err(|error| {
+            CruiseError::ReadOnlyVerificationFailed(format!("after execution: {error}"))
+        })? {
             return Err(CruiseError::ReadOnlyWorkspaceChanged);
         }
         result

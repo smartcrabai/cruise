@@ -226,6 +226,7 @@ With `--no-interactive-planning`, SDK planning uses the direct-to-file flow even
 - `after_pr` enables after-PR automation without merging.
 - `merge` opts into the same after-PR prelude plus a final native synchronous squash merge. On GitHub, PRs that are behind the base or have conflicts are automatically synchronized and recovered before merging. This recovery is not performed on GitLab. It does not enable auto-merge, bypass policy, or use a merge queue.
 - `formal_methods` enables workflow-level executable Quint, Alloy, and Gherkin specifications and CI; it is not an initial-plan mode.
+- `advisor` enables one [read-only advisor pass](sdk.md#advisor-steps) after implementation in `builtin:tdd` (jcode only, off by default). An ordinary failure bypasses `apply-advice`; after success, the normal model checks the advice once, even for `NO FINDINGS`.
 
 `research` remains read-only with `create_pr: false`; `merge` never creates a PR or overrides that no-PR policy. If an opted-in after-PR action is unavailable because no PR is created (including `research`, `exec`, current-branch runs, or a no-commit run), Cruise skips it and prints the reason.
 

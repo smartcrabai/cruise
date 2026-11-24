@@ -300,6 +300,13 @@ path = "tests/list_actions_bdd.rs"
 # macOS/Linux PTY contract, explicitly runnable with --test list_actions_bdd.
 test = false
 
+[[test]]
+harness = false
+name = "advisor_bdd"
+path = "tests/advisor_bdd.rs"
+# Unix subprocess contracts, explicitly runnable with --test advisor_bdd.
+test = false
+
 [profile.release]
 codegen-units = 1
 lto = true

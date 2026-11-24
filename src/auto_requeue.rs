@@ -47,6 +47,7 @@ pub(crate) fn is_eligible_error(error: &CruiseError) -> bool {
         | CruiseError::SquashMergeFailed(_)
         | CruiseError::CommitGuardViolation(_)
         | CruiseError::ReadOnlyWorkspaceChanged
+        | CruiseError::ReadOnlyVerificationFailed(_)
         | CruiseError::Other(_)
         | CruiseError::StepPaused => false,
     }

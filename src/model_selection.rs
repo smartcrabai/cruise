@@ -103,6 +103,15 @@ pub(crate) fn planning_spec<'a>(
     plan.filter(|spec| spec.primary().is_some()).or(global)
 }
 
+/// Select the advisor role's model before applying the usual step override.
+pub(crate) fn advisor_spec<'a>(
+    advisor: Option<&'a ModelSpec>,
+    plan: Option<&'a ModelSpec>,
+    global: Option<&'a ModelSpec>,
+) -> Option<&'a ModelSpec> {
+    planning_spec(advisor, planning_spec(plan, global))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SdkSessionId {
     pub sdk: Sdk,

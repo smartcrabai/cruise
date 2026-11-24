@@ -78,6 +78,10 @@
       "$ref": "#/$defs/SubagentModelEntry",
       "description": "Default subagent model for jcode workflow prompt steps and planning. Plain model strings only; step values override it. One nonblank model with no arrays, fallback chain, or recognized `:effort` suffix."
     },
+    "advisor_model": {
+      "allOf": [{ "$ref": "#/properties/plan_model" }],
+      "description": "Model or candidate list for advisor prompts. An empty list or missing value falls back to plan_model, then model. A step model overrides this role."
+    },
     "interactive_planning": {
       "type": "boolean",
       "description": "Whether jcode planning uses session tools to ask questions and submit or revise the plan instead of writing `plan.md` directly. Default: true. Has no effect with a `command` backend, which always uses file-based planning."
@@ -128,7 +132,8 @@
       "additionalProperties": {
         "allOf": [
           { "$ref": "#/$defs/StepConfig" },
-          { "not": { "required": ["quality_gates"] } }
+          { "not": { "required": ["quality_gates"] } },
+          { "properties": { "advisor": { "const": false } } }
         ]
       },
       "description": "Steps to run after a PR is created. The github-review step type is allowed only here."
@@ -233,6 +238,11 @@
         "allow_commit": {
           "type": "boolean",
           "description": "Allow this prompt step to create commits or otherwise advance Git HEAD. Defaults to false and is omitted when false during serialization. Only applies to prompt steps; group-call and workflow-call steps cannot set it to true."
+        },
+        "advisor": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run this ordinary top-level prompt as a read-only jcode advisor. Requires output_file and cannot allow commits."
         },
         "disallowed_tools": {
           "type": "array",
@@ -424,6 +434,28 @@
         }
       },
       "allOf": [
+        {
+          "if": { "required": ["advisor"], "properties": { "advisor": { "const": true } } },
+          "then": {
+            "required": ["output_file"],
+            "oneOf": [
+              { "required": ["prompt"] },
+              { "required": ["prompt_file"] }
+            ],
+            "properties": {
+              "output_file": { "type": "string", "pattern": "\\S" },
+              "allow_commit": { "const": false },
+              "permission": { "const": "read-only" },
+              "command": { "type": "null" },
+              "option": { "type": "null" },
+              "parallel": { "type": "null" },
+              "group": { "type": "null" },
+              "workflow_call": { "type": "null" },
+              "github-review": { "type": "null" },
+              "squash-merge": { "type": "null" }
+            }
+          }
+        },
         {
           "if": {
             "required": ["require_bubblewrap"],
@@ -759,6 +791,7 @@
         "when": { "$ref": "#/$defs/StepConfig/properties/when" },
         "timeout": { "$ref": "#/$defs/StepConfig/properties/timeout" },
         "computer_use": { "$ref": "#/$defs/StepConfig/properties/computer_use" },
+        "advisor": { "const": false },
         "permission": { "$ref": "#/$defs/StepConfig/properties/permission" },
         "disallowed_tools": { "$ref": "#/$defs/StepConfig/properties/disallowed_tools" },
         "output_file": { "$ref": "#/$defs/StepConfig/properties/output_file" },
@@ -908,7 +941,10 @@
         "steps": {
           "type": "object",
           "additionalProperties": {
-            "$ref": "#/$defs/StepConfig"
+            "allOf": [
+              { "$ref": "#/$defs/StepConfig" },
+              { "properties": { "advisor": { "const": false } } }
+            ]
           },
           "description": "Named steps belonging to this group"
         }

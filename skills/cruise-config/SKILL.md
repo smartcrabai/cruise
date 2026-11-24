@@ -61,6 +61,8 @@ model reference; project defaults are never auto-created. External
 
 `cruise manager` ignores workflow discovery, `-c`, and `CRUISE_CONFIG`. Its conversation and child sessions resolve `builtin:tdd` with user/project `default.yaml` and overrides from the daemon environment; the CLI does not forward its `CRUISE_*` overrides to Manager. Conversation requires `sdk: jcode` (not `command:`) and a `plan_model` or `model`. Each proposal freezes the resolved child workflow with `create_pr`, `cleanup_after_pr`, and `force_exec` off and the after-PR steps and `after_pr`/`merge` flags removed. To change Manager children, edit `default.yaml` (or the daemon environment) and request a new proposal; project workflow YAML has no effect.
 
+For a jcode-only read-only second opinion, use a top-level `advisor: true` prompt with an `output_file`. See [Advisor steps](references/sdk.md#advisor-steps) for model precedence, fresh artifacts, and fatal guard failures. `builtin:tdd` already provides an opt-in `advisor` flag.
+
 ## Minimal config
 
 `steps` is required. `command` and `sdk` are mutually exclusive; the default `jcode` SDK backend is used only when neither remains set in the resolved workflow after applicable `default.yaml` layers are applied.

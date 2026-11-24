@@ -21,6 +21,9 @@ use crate::workflow::CompiledWorkflow;
 
 mod parallel;
 
+#[cfg(all(test, unix))]
+mod advisor_tests;
+
 /// Result of a completed `execute_steps` run.
 pub struct ExecutionResult {
     pub run: usize,
@@ -129,6 +132,7 @@ pub(crate) struct StepExecOutcome {
     /// this attempt exactly like the output marker
     /// ([`detect_no_changes_marker`]).
     pub skip_step_reason: Option<String>,
+    pub advice: Option<String>,
 }
 
 pub(crate) struct CommandStepOptions<'a> {
@@ -759,6 +763,11 @@ async fn step_loop_iteration(
         .steps
         .get(current_step)
         .ok_or_else(|| CruiseError::StepNotFound(current_step.to_string()))?;
+    if step_config.advisor
+        && let Some(output_file) = step_config.output_file.as_deref()
+    {
+        crate::advisor::invalidate(vars.artifacts_root(), output_file)?;
+    }
     let step_call_site = ctx
         .compiled
         .step_to_invocation
@@ -922,8 +931,11 @@ async fn step_loop_iteration(
             // actions below for this attempt; a declaration is always
             // logged so it stays visible even though it changes behavior silently
             // from the workflow's point of view.
-            let declared_reason =
-                resolve_declared_no_changes(outcome.skip_step_reason.clone(), vars.prev_output());
+            let declared_reason = if step_config.advisor {
+                None
+            } else {
+                resolve_declared_no_changes(outcome.skip_step_reason.clone(), vars.prev_output())
+            };
             if let Some(reason) = declared_reason {
                 let msg = format!("intentional no-changes declared: {reason}");
                 crate::status_eprintln!("  {} {msg}", style("i").cyan());
@@ -1154,6 +1166,12 @@ async fn step_loop_iteration(
         let target = next
             .map(|target| crate::graph::resolve_target(ctx.compiled, &target))
             .transpose()?;
+        if !failed_attempt
+            && let Some(advice) = outcome.advice
+            && let Some(output_file) = step_config.output_file.as_deref()
+        {
+            vars.write_artifact(output_file, &advice)?;
+        }
         vars.set_quality_gate_feedback(gate_feedback);
         Ok(Transition {
             target,
@@ -1229,6 +1247,7 @@ async fn execute_step_kind_inner(
                 failed: false,
                 native_resync_required: false,
                 skip_step_reason: None,
+                advice: None,
             })
         }
         StepKind::SquashMerge => {
@@ -1354,10 +1373,12 @@ async fn execute_step_kind_inner(
                 failed: resync_required,
                 native_resync_required: resync_required,
                 skip_step_reason: None,
+                advice: None,
             })
         }
         StepKind::Prompt(step) => {
-            let lease = ctx.instructions.and_then(|inbox| {
+            let advisor = ctx.compiled.steps[current_step].advisor;
+            let lease = ctx.instructions.filter(|_| !advisor).and_then(|inbox| {
                 inbox.lease(
                     current_step,
                     crate::instruction_inbox::DeliveryScope::Sequential,
@@ -1387,13 +1408,14 @@ async fn execute_step_kind_inner(
             finish_instruction_lease(ctx, lease, current_step, &result);
             let elapsed = step_start.elapsed();
             match result {
-                Ok(skip_step_reason) => {
+                Ok((skip_step_reason, advice)) => {
                     log_step_result(elapsed, true);
                     Ok(StepExecOutcome {
                         option_next: None,
                         failed: false,
                         native_resync_required: false,
                         skip_step_reason,
+                        advice,
                     })
                 }
                 Err(CruiseError::StepTimeout { .. }) => {
@@ -1408,12 +1430,14 @@ async fn execute_step_kind_inner(
                         failed: true,
                         native_resync_required: false,
                         skip_step_reason: None,
+                        advice: None,
                     })
                 }
                 Err(
                     e @ (CruiseError::CommitGuardViolation(_) | CruiseError::MissingJcodeModel(_)),
                 ) => Err(e),
                 Err(CruiseError::Interrupted) => Err(CruiseError::Interrupted),
+                Err(e) if advisor && is_read_only_guard_error(&e) => Err(e),
                 Err(error @ CruiseError::InvalidStepConfig(_))
                     if ctx
                         .compiled
@@ -1435,6 +1459,7 @@ async fn execute_step_kind_inner(
                         failed: true,
                         native_resync_required: false,
                         skip_step_reason: None,
+                        advice: None,
                     })
                 }
                 Err(e) => Err(e),
@@ -1474,6 +1499,7 @@ async fn execute_step_kind_inner(
                         failed: !success,
                         native_resync_required: false,
                         skip_step_reason: None,
+                        advice: None,
                     })
                 }
                 Err(CruiseError::StepTimeout { .. }) => {
@@ -1488,6 +1514,7 @@ async fn execute_step_kind_inner(
                         failed: true,
                         native_resync_required: false,
                         skip_step_reason: None,
+                        advice: None,
                     })
                 }
                 Err(e) => Err(e),
@@ -1502,6 +1529,7 @@ async fn execute_step_kind_inner(
                 failed: false,
                 native_resync_required: false,
                 skip_step_reason: None,
+                advice: None,
             })
         }
     }
@@ -1702,6 +1730,13 @@ pub(crate) enum PromptStepOutput<'a> {
     Redirect(&'a crate::step::command::StepLogCallback<'a>),
 }
 
+fn is_read_only_guard_error(error: &CruiseError) -> bool {
+    matches!(
+        error,
+        CruiseError::ReadOnlyWorkspaceChanged | CruiseError::ReadOnlyVerificationFailed(_)
+    )
+}
+
 pub(crate) fn log_instruction_lease(
     ctx: &ExecutionContext<'_>,
     lease: Option<&crate::instruction_inbox::Lease<'_>>,
@@ -1749,8 +1784,8 @@ pub(crate) fn finish_instruction_lease<T>(
 }
 
 /// Execute a prompt step, updating variable state and returning the LLM
-/// output. Returns the `skip_step` tool's captured reason, if the agent called
-/// it during this turn (`None` otherwise).
+/// outcome: the captured `skip_step` reason, if any, and the advisor output
+/// to publish once the visit is accepted.
 ///
 /// `register_skip_tool` gates whether the `skip_step` tool (see
 /// [`crate::sdk_tools::skip_step_tool`]) is registered for this run: the
@@ -1775,11 +1810,27 @@ pub(crate) async fn run_prompt_step(
     allow_commit: bool,
     delivered: Option<&str>,
     ask_handler: Option<&Arc<dyn crate::ask_handler::AskHandler>>,
-) -> Result<Option<String>> {
-    let require_bubblewrap = compiled
-        .steps
-        .get(timeout_step_name)
-        .is_some_and(|config| config.require_bubblewrap);
+) -> Result<(Option<String>, Option<String>)> {
+    let config = compiled.steps.get(timeout_step_name);
+    let require_bubblewrap = config.is_some_and(|config| config.require_bubblewrap);
+    let advisor = config.is_some_and(|config| config.advisor);
+    let (on_step_log, console_output) = match output {
+        PromptStepOutput::Console(log) => (log, true),
+        PromptStepOutput::Redirect(log) => (Some(log), false),
+    };
+    if advisor {
+        let output_file = step.output_file.as_deref().ok_or_else(|| {
+            CruiseError::InvalidStepConfig(format!(
+                "step '{timeout_step_name}' with advisor requires output_file"
+            ))
+        })?;
+        let message = crate::advisor::prepare(vars.artifacts_root(), output_file, working_dir)?;
+        if let Some(log) = on_step_log {
+            log("info", &message);
+        } else {
+            crate::status_eprintln!("  {message}");
+        }
+    }
     if let Some(inst) = &step.instruction {
         let resolved = vars.resolve(inst)?;
         if vars.input_is_empty() {
@@ -1804,14 +1855,22 @@ pub(crate) async fn run_prompt_step(
             crate::status_eprintln!("  {}", style(resolved).dim());
         }
     }
-    let permission = step.permission.unwrap_or(compiled.permission);
+    let permission = if advisor {
+        crate::config::PermissionMode::ReadOnly
+    } else {
+        step.permission.unwrap_or(compiled.permission)
+    };
     let tool_policy = crate::tool_policy::ToolPolicy::for_prompt_step(
         &compiled.disallowed_tools,
         &step.disallowed_tools,
         allow_commit,
         permission,
     );
-    let mcp_servers = tool_policy.filter_mcp_servers(&compiled.mcp_servers);
+    let mcp_servers = if advisor {
+        crate::config::McpServers::default()
+    } else {
+        tool_policy.filter_mcp_servers(&compiled.mcp_servers)
+    };
     let prompt = if delivered.is_none() && vars.quality_gate_feedback().is_none() {
         crate::prompt_render::assemble_step_prompt(&step.prompt, vars, allow_commit, &tool_policy)?
     } else {
@@ -1826,7 +1885,19 @@ pub(crate) async fn run_prompt_step(
     };
 
     let executor = crate::executor::Executor::new(compiled.sdk.as_deref(), &compiled.command);
-    let model_or_mode = executor.step_model(step.model.as_deref(), compiled.model.as_ref());
+    let model_or_mode = if advisor {
+        crate::model_selection::step_model_spec(
+            crate::model_selection::advisor_spec(
+                compiled.advisor_model.as_ref(),
+                compiled.plan_model.as_ref(),
+                compiled.model.as_ref(),
+            ),
+            step.model.as_deref(),
+            crate::model_selection::Sdk::Jcode,
+        )
+    } else {
+        executor.step_model(step.model.as_deref(), compiled.model.as_ref())
+    };
     let computer_use = step.computer_use.unwrap_or(compiled.computer_use);
 
     let commit_guard = if allow_commit {
@@ -1843,20 +1914,12 @@ pub(crate) async fn run_prompt_step(
     // reason here and we read it back once the turn ends, no UI round-trip
     // needed. Only populated with a tool when `register_skip_tool` is set --
     // see the doc comment above for why this can't be unconditional.
-    let skip_reason_store: std::sync::Arc<std::sync::Mutex<Option<String>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(None));
-    let tools = if register_skip_tool {
-        vec![crate::sdk_tools::skip_step_tool(std::sync::Arc::clone(
-            &skip_reason_store,
-        ))]
-    } else {
-        Vec::new()
-    };
+    let skip_reason_store =
+        (register_skip_tool && !advisor).then(|| Arc::new(std::sync::Mutex::new(None)));
+    let tools = skip_reason_store.as_ref().map_or_else(Vec::new, |store| {
+        vec![crate::sdk_tools::skip_step_tool(Arc::clone(store))]
+    });
 
-    let (on_step_log, console_output) = match output {
-        PromptStepOutput::Console(log) => (log, true),
-        PromptStepOutput::Redirect(log) => (Some(log), false),
-    };
     let spinner = console_output.then(|| crate::spinner::Spinner::start("Cruising..."));
     let output_is_streamed = on_step_log.is_some() && crate::console_mode::has_status_sink();
     let on_stdout: &(dyn Fn(&str) + Send + Sync) = &|line: &str| {
@@ -1964,11 +2027,17 @@ pub(crate) async fn run_prompt_step(
                 Ok(r) => r,
                 Err(_elapsed) => {
                     prompt_cancel_token.cancel();
-                    let _ = run_future.await;
-                    Err(CruiseError::StepTimeout {
-                        step: timeout_step_name.to_string(),
-                        after_secs: duration.as_secs(),
-                    })
+                    let result = run_future.await;
+                    if advisor && result.as_ref().is_err_and(is_read_only_guard_error) {
+                        result
+                    } else if advisor && cancel_token.is_some_and(CancellationToken::is_cancelled) {
+                        Err(CruiseError::Interrupted)
+                    } else {
+                        Err(CruiseError::StepTimeout {
+                            step: timeout_step_name.to_string(),
+                            after_secs: duration.as_secs(),
+                        })
+                    }
                 }
             }
         } else {
@@ -1977,6 +2046,12 @@ pub(crate) async fn run_prompt_step(
     };
     drop(spinner);
     let result = match commit_guard {
+        Some(guard) if advisor && prompt_result.as_ref().is_err_and(is_read_only_guard_error) => {
+            // Still give the commit guard a chance to restore HEAD. Its Git
+            // check can also fail when the workspace itself disappeared.
+            let _ = guard.finish(Ok(()));
+            prompt_result?
+        }
         Some(guard) => guard.finish(prompt_result)?,
         None => prompt_result?,
     }
@@ -1987,18 +2062,22 @@ pub(crate) async fn run_prompt_step(
     }
 
     let output = result.output;
-    if let Some(output_file) = step.output_file.as_deref() {
-        vars.write_artifact(output_file, &output)?;
-    }
-    vars.set_prev_output(Some(output.clone()));
-    vars.set_prev_stderr(Some(result.stderr));
-    vars.set_prev_input(None);
+    // Advice is published by the visit only after acceptance.
+    let advice = if advisor {
+        Some(output)
+    } else {
+        if let Some(output_file) = step.output_file.as_deref() {
+            vars.write_artifact(output_file, &output)?;
+        }
+        vars.set_prev_output(Some(output));
+        vars.set_prev_stderr(Some(result.stderr));
+        vars.set_prev_input(None);
+        None
+    };
 
-    let skip_step_reason = skip_reason_store
-        .lock()
-        .ok()
-        .and_then(|mut guard| guard.take());
-    Ok(skip_step_reason)
+    let skip_step_reason =
+        skip_reason_store.and_then(|store| store.lock().ok().and_then(|mut guard| guard.take()));
+    Ok((skip_step_reason, advice))
 }
 
 /// Execute a command step, updating variable state and returning whether its
@@ -2166,6 +2245,7 @@ fn print_dry_run_config(config: &WorkflowConfig) {
     for (field, spec) in [
         ("model", config.model.as_ref()),
         ("plan_model", config.plan_model.as_ref()),
+        ("advisor_model", config.advisor_model.as_ref()),
     ] {
         let Some(spec) = spec else { continue };
         match spec {

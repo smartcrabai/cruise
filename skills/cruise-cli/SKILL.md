@@ -261,6 +261,8 @@ The remote host owns its XDG session/config/state directories, jcode authenticat
 
 ### Built-in workflow flags
 
+`builtin:tdd` supports `cruise run <id> -f advisor` for one read-only second opinion after implementation, off by default and jcode-only. On success, the normal model evaluates fresh advice once and applies only confirmed in-scope defects. It does not request another review.
+
 `tdd` and `research` declare `after_pr` and `merge`, both off when absent. `research` is `create_pr: false`, so its flags are skipped with a reason. `refactor`, `add-tests`, `add-formal-specs`, and `security` declare neither flag and have no after-PR steps, even with `--no-force-exec`. Only `tdd` and `refactor` additionally declare the opt-in `e2e` flag and `formal_methods`; there are no separate browser/app flags. `after_pr` runs after-PR automation without merging; `merge` runs the same prelude and then the native synchronous squash merge once.
 
 `e2e` enables applicable web, mobile, and desktop UI testing with only tools already in the repository. E2E prompts consult the embedded common policy with `cruise docs e2e` and the applicable framework policy with `cruise docs e2e <framework>`; the canonical sources are in `docs/e2e/`. Output is read-only, offline, and tied to the running Cruise version. For native Android Jetpack Compose UI, use the `jetpack-compose` policy; non-Compose Android follows the common policy as an unlisted target. Other unlisted native targets are not unsupported: use suitable existing repository tools only and report missing capabilities without introducing defaults. Capture actual app screenshots and inspect them at pixel level; save deterministic assertion-bearing E2E tests. TDD runs `e2e-baseline` → `e2e` before `verify-review-pass`; refactor runs `prepare-e2e-baseline` → `prepare-e2e` → the existing `verify-refactor-pass` review → `e2e-final-baseline` → `e2e-final-check`, all gated by `e2e`. A host guard gate retries an E2E step until it undoes changes to dependency manifests, lockfiles, toolchain pins, or CI configuration and any newly introduced E2E framework. The TDD `e2e` and refactor `e2e-final-check` reports list missing capabilities with their exact preparation under `## Blockers` and end with one `E2E_STATUS: passed|blocked|not-applicable` line; `blocked` stops the session with the blockers as its failure reason. Prepare and resume, or resume with `-f e2e=off` to continue without UI E2E. Mark out-of-scope targets not applicable; complete reachable work and record exact tools, versions, setup, and results.
@@ -420,6 +422,7 @@ When loading a workflow config, these process environment variables override the
 |----------|-----------|
 | `CRUISE_MODEL` | The workflow's default `model` for prompt steps. |
 | `CRUISE_PLAN_MODEL` | The workflow's `plan_model` for the built-in plan step (which otherwise falls back to `model`). |
+| `CRUISE_ADVISOR_MODEL` | The workflow's `advisor_model`, a model string or JSON fallback array for advisor steps. |
 | `CRUISE_SUBAGENT_MODEL` | `subagent_model`, the subagent model entry. |
 | `CRUISE_SDK` | The workflow's SDK backend, which must be `jcode`; it also clears `command` because the two are mutually exclusive. |
 | `CRUISE_COMMAND` | `command`, a JSON array; clears `sdk`. |
