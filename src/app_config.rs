@@ -27,6 +27,14 @@ pub struct AppConfig {
     pub run_all_parallelism: usize,
     #[serde(alias = "run_all_auto_requeue_max_attempts")]
     pub run_all_auto_requeue_max_attempts: u32,
+    /// Automatic reruns per PR head of GitHub Actions jobs no runner acquired.
+    ///
+    /// Defaults to `2`; `0` disables them.
+    #[serde(
+        rename = "ci_unacquired_rerun_max_attempts",
+        alias = "ciUnacquiredRerunMaxAttempts"
+    )]
+    pub ci_unacquired_rerun_max_attempts: u32,
 
     /// Default model reference or ordered primary-plus-fallback list.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -137,6 +145,12 @@ struct RuntimeConfig {
     run_all_parallelism: usize,
     #[serde(alias = "run_all_auto_requeue_max_attempts")]
     run_all_auto_requeue_max_attempts: u32,
+    #[serde(
+        rename = "ci_unacquired_rerun_max_attempts",
+        alias = "ciUnacquiredRerunMaxAttempts",
+        default = "default_ci_unacquired_rerun_max_attempts"
+    )]
+    ci_unacquired_rerun_max_attempts: u32,
     #[serde(rename = "prevent_sleep", alias = "preventSleep")]
     prevent_sleep: bool,
     model: Option<crate::config::ModelSpec>,
@@ -151,6 +165,10 @@ struct RuntimeConfig {
 
 fn default_parallelism() -> usize {
     1
+}
+
+const fn default_ci_unacquired_rerun_max_attempts() -> u32 {
+    2
 }
 
 fn deserialize_workflow_categories<'de, D: serde::Deserializer<'de>>(
@@ -192,6 +210,7 @@ impl Default for AppConfig {
             ui_language: None,
             run_all_parallelism: 1,
             run_all_auto_requeue_max_attempts: 0,
+            ci_unacquired_rerun_max_attempts: default_ci_unacquired_rerun_max_attempts(),
             model: None,
             languages: None,
             commit_message_template: None,
@@ -271,6 +290,7 @@ impl AppConfig {
         let config = Self {
             run_all_parallelism: runtime.run_all_parallelism,
             run_all_auto_requeue_max_attempts: runtime.run_all_auto_requeue_max_attempts,
+            ci_unacquired_rerun_max_attempts: runtime.ci_unacquired_rerun_max_attempts,
             prevent_sleep: runtime.prevent_sleep,
             model: runtime.model,
             plan_model: runtime.plan_model,
@@ -457,6 +477,18 @@ mod tests {
     use super::*;
     use crate::test_support::{EnvGuard, lock_process};
     use tempfile::TempDir;
+
+    #[test]
+    fn runtime_ci_unacquired_rerun_limit_defaults_to_two_and_reads_both_names() {
+        let parse = |json: &str| {
+            serde_json::from_str::<RuntimeConfig>(json)
+                .unwrap_or_else(|error| panic!("{error}"))
+                .ci_unacquired_rerun_max_attempts
+        };
+        assert_eq!(parse("{}"), 2);
+        assert_eq!(parse(r#"{"ci_unacquired_rerun_max_attempts":0}"#), 0);
+        assert_eq!(parse(r#"{"ciUnacquiredRerunMaxAttempts":5}"#), 5);
+    }
 
     #[test]
     fn env_parallelism_is_validated_and_never_implicitly_persisted() {

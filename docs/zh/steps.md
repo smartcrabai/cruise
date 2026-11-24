@@ -169,6 +169,8 @@ after-pr:
 
 内置的 PR 后提示禁止提交、推送和调用代码托管服务。宿主提交经过验证的冲突修复，只向对应的 PR/MR 分支推送。CI 修复以当前 HEAD 的证据为准：宿主验证器能够运行时，会在发布前验证准确的已暂存修复；否则 Cruise 会发出警告，在未经宿主验证的情况下发布，并依赖推送后该 HEAD 的 CI。随后 Cruise 会重新检查 CI、在会话中对符合条件的同一 HEAD 作业重试一次，或者停止且不合并。停止后再次运行该会话时，会重新检查当前 HEAD 的 CI，而不会沿用之前的判定。原生合并步骤仍会独立检查是否可以合并。
 
+在 GitHub 上，如果所有失败的检查都是因为没有运行器领取而被 GitHub 取消的 Actions 作业，内置的 `rerun-unacquired-ci` 步骤会重新运行失败的作业（`gh run rerun --failed`），并在不调用修复提示的情况下返回 `wait-ci`。宿主通过 API 逐个确认此类作业：conclusion 为 `cancelled`、未分配运行器、没有步骤，且检查运行带有失败注释 `The job was not acquired by Runner ...`。CI 证据会将其记录为 `Runner unacquired (host-verified)`。如果混有真正的失败，仍由修复提示照常处理，不会自动重新运行：修复会推送新的 HEAD 并重新触发 CI，而 `--failed` 也会重新运行真正的失败作业。每个 PR HEAD 最多重新运行 `ci_unacquired_rerun_max_attempts` 次（默认 `2`，`0` 表示禁用），次数保存在会话中，恢复会话不会重新计数。达到上限后，修复提示会收到证据并返回 `wait`，运行随即停止且不合并，并给出指明该上限的消息。这些重新运行同样消耗工作流 `max_retries` 的边预算。GitLab 不受影响。在此步骤出现之前创建的会话沿用其保存的 after-PR 步骤，不会自动重新运行。
+
 `require_bubblewrap: true` 和守护进程环境变量 `CRUISE_JCODE_BUBBLEWRAP=1` 会请求使用 Linux jcode Bubblewrap 隔离。Cruise 每个进程只探测一次可用性。如果构建未启用 `jcode-bubblewrap`、宿主不是 Linux，或探测失败，该步骤会在未隔离的情况下运行并显示警告。`command:` 后端不会被拒绝；它会在未隔离的情况下运行并显示警告。成功探测后 Bubblewrap 启动失败，仍会使本次尝试失败。内置冲突修复、CI 修复和评审提示会保留 `require_bubblewrap: true`，因此在可能时会使用隔离。
 
 自动提交 CI 修复时，如果 Bubblewrap 可用且设置了 `CRUISE_CI_VERIFY_SCRIPT`，宿主会在提交前验证准确的已暂存修复；否则 Cruise 会发出警告，在未经宿主验证的情况下提交并推送，并依赖推送后该 HEAD 的 CI。已配置的验证器若运行失败，会阻止提交。请在守护进程环境中将 `CRUISE_CI_VERIFY_SCRIPT` 设置为工作树之外可信 shell 脚本的绝对路径。该脚本不能有其他硬链接，组和其他用户不能写入。判定规则不得来自候选树中的脚本。脚本会使用只读挂载的 `/candidate` 和可写的专用 `/tmp`，且无法访问网络或继承的凭据。不支持的树（例如包含符号链接或子模块）不会发布修复。已保存的会话保留原工作流。

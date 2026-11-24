@@ -29,6 +29,7 @@
 - Update SwiftUI and Slint UI E2E policies with faster feedback loops that keep target-runtime verification separate.
 - Move the built-in TDD ledger snapshot and post-PR Git operations to the host. Keep Git metadata read-only in isolated jcode turns; stop on an unexpected command status rather than advancing to publication.
 - Leave OpenTelemetry span status unset and omit `error.type` for `paused` and `cancelled` operations; `cruise.outcome` and operation metrics still carry these outcomes. Failures and timeouts remain errors.
+- Accept `if.fail` as a named jump on `after-pr` command steps, not only on native `squash-merge: true`. Prompt steps and `{ retry: true }` are still rejected in `after-pr`.
 
 ### Added
 
@@ -48,6 +49,7 @@
 - Add the bounded `plan_revision` Quint/Alloy specification with production Gherkin and negative controls (`scripts/check_plan_revision_specs.sh`) covering planning-input delivery, client action parity, and phase preservation.
 - Add best-effort client-side Herdr lifecycle reporting over OSC 7501 for CLI `plan`/`run`/`exec` (including Run/Resume from `cruise list`), with fully configured classic Herdr taking precedence. Only `cruise list` browsing/action-selection menus and WebUI daemon sessions are excluded.
 - Export the session base (managed clone with `--repo`) and resolved workspace as raw `cruise.execution`-only trace attributes; telemetry remains opt-in.
+- Rerun GitHub Actions jobs that failed only because no runner acquired them (`The job was not acquired by Runner of type hosted even after multiple attempts`) during after-PR CI follow-up, then wait for CI again instead of stopping with `CI remains unresolved`. The new built-in `rerun-unacquired-ci` step confirms each job through the API (conclusion `cancelled`, no runner, no steps, and that check-run failure annotation), records the evidence, and runs `gh run rerun --failed` at most `ci_unacquired_rerun_max_attempts` times per PR head (default `2`; `0` disables; set with `cruise config --set-ci-unacquired-rerun-max-attempts <N>`). The count is kept in the session across resumes. Failures that include a genuine job failure still go to CI repair without a rerun; the missing log of a job no runner acquired no longer marks that repair evidence incomplete. GitLab is unchanged, and sessions created earlier keep their saved after-PR steps.
 
 ### Fixed
 

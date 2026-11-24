@@ -172,7 +172,7 @@ steps:
 `if.fail` 与其他流程控制跳转受相同的循环保护预算约束（使用 `--max-retries`，否则使用顶层 `max_retries`，再否则使用 3）。预算涵盖所有图边，但用户跳过时的回退边和组重试耗尽后的退出边除外，因此普通的顺序推进以及显式的 `next`/选项跳转也会计数：任何单条受预算约束的边，其遍历次数超过上限时，运行都会因循环保护而停止，而不会让配置错误的循环无限运行。
 
 **限制：**
-- 组级别以及所有 `after-pr` 步骤均不接受 `if.fail`，但原生 `squash-merge: true` 除外，它只接受跳转到指定名称步骤的形式。
+- 组级别不接受 `if.fail`。在 `after-pr` 中，只有命令步骤和原生 `squash-merge: true` 接受跳转到指定名称步骤的形式；提示步骤和 `{ retry: true }` 会被拒绝。
 - 在普通步骤中，`if.fail` 可以与其他 `if:` 键（`file-changed`、`head-changed`、`no-file-changes`）组合使用；原生 squash-merge 则只接受指向指定名称步骤的 `if.fail` 路由。
 
 <a id="quality-gates-quality_gates"></a>

@@ -680,6 +680,17 @@ steps:
             sleep 5
           done ;;
       esac
+  rerun-unacquired-ci:
+    skip: prev.success
+    timeout: 10m
+    env:
+      CRUISE_AFTER_PR_PLAN: "{plan}"
+      CRUISE_AFTER_PR_NUMBER: "{pr.number}"
+      CRUISE_AFTER_PR_URL: "{pr.url}"
+    command: '{cruise.bin} internal rerun-unacquired-ci'
+    next: wait-ci
+    if:
+      fail: fix-ci-error
   fix-ci-error:
     skip: prev.success
     permission: full
@@ -697,4 +708,4 @@ steps:
       Return exactly one JSON object with no Markdown:
       - `{{"action":"commit"}}` after an in-scope repair.
       - `{{"action":"retry","selection":1}}` only for a documented flaky or unrelated failure when no files were changed; use the eligible job ordinal in the evidence in place of `1`. The host can retry at most once for the same head.
-      - `{{"action":"wait"}}` when neither action is justified, including incomplete evidence. This leaves the PR/MR unmerged.
+      - `{{"action":"wait"}}` when neither action is justified, including incomplete evidence or when every check is marked `Runner unacquired` (the host already reran those jobs up to its limit). This leaves the PR/MR unmerged.

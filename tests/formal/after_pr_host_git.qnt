@@ -11,6 +11,7 @@ module after_pr_host_git {
     initialConflictPaths: int, committedPaths: int,
     publications: int, blockedAt: int,
     ciGreen: bool, retriedHeads: Set[int], retryHead: int, retryOutcome: int,
+    failureKind: int, unacquiredReruns: int -> int,
     readinessHead: int, readinessAsserted: bool, readinessReadOnly: bool,
     readinessBehind: bool, readinessConflict: bool,
     nativeMerged: bool, waiting: bool
@@ -24,6 +25,10 @@ module after_pr_host_git {
   // 9 retry pending, 10 terminal, 11 merged. Evidence: 0 none, 1 verified,
   // 2 unresolved/failed. Each head may consume one retry, reserved pre-request.
   // Retry outcomes: 0 success, 1 failed, 2 unknown, 3 wait.
+  // Failure kinds: 0 genuine, 1 only jobs no runner acquired, 2 both.
+  // The host reruns kind 1 at most MAX_RERUNS times per head, counted
+  // pre-request in session state that resuming keeps.
+  pure val MAX_RERUNS = 2
   pure val initial: State = {
     phase: 0, remoteHead: 0, remoteTree: 0,
     workspaceHead: 0, workspaceParentHead: 0, workspaceTree: 0,
@@ -34,6 +39,7 @@ module after_pr_host_git {
     initialConflictPaths: 0, committedPaths: 0,
     publications: 0, blockedAt: 0,
     ciGreen: false, retriedHeads: Set(), retryHead: -1, retryOutcome: -1,
+    failureKind: -1, unacquiredReruns: Map(0 -> 0, 1 -> 0, 2 -> 0),
     readinessHead: -1, readinessAsserted: false, readinessReadOnly: false,
     readinessBehind: false, readinessConflict: false,
     nativeMerged: false, waiting: false
@@ -61,9 +67,21 @@ module after_pr_host_git {
     s.phase == 4, s.bindingTrusted, s.bindingHead == s.remoteHead,
     s.workspaceHead == s.remoteHead, s.workspaceTree == s.remoteTree,
     record({ ...s, ciGreen: true }, "ciPass") }
-  action ciFail = all {
+  action ciFail(kind: int): bool = all {
     s.phase == 4, s.bindingTrusted, s.bindingHead == s.remoteHead,
-    record({ ...s, phase: 5, ciGreen: false }, "ciFail") }
+    Set(0, 1, 2).contains(kind),
+    record({ ...s, phase: 5, ciGreen: false, failureKind: kind }, "ciFail") }
+
+  // Only jobs no runner acquired failed, and the head has reruns left.
+  def rerunDue(st: State): bool = all {
+    st.phase == 5, st.failureKind == 1,
+    st.unacquiredReruns.get(st.remoteHead) < MAX_RERUNS }
+  // The host reruns such a head instead of asking the repair agent.
+  action rerunUnacquired = all {
+    rerunDue(s), s.bindingTrusted, s.bindingHead == s.remoteHead,
+    record({ ...s, phase: 4, ciGreen: false,
+      unacquiredReruns: s.unacquiredReruns.setBy(s.remoteHead, n => n + 1) },
+      "rerunUnacquired") }
 
   // Conflict handling starts only from a trusted, unchanged PR binding.
   action observeConflict(paths: int): bool = all {
@@ -90,7 +108,7 @@ module after_pr_host_git {
 
   // A model suggestion changes the workspace tree only; it is not publishable.
   action suggestRepair(tree: int): bool = all {
-    s.phase == 5, s.bindingTrusted, s.bindingHead == s.remoteHead,
+    s.phase == 5, not(rerunDue(s)), s.bindingTrusted, s.bindingHead == s.remoteHead,
     s.workspaceHead == s.remoteHead, s.workspaceParentHead == s.remoteHead,
     s.workspaceTree == s.remoteTree,
     Set(0, 1, 2, 3).contains(tree),
@@ -157,7 +175,7 @@ module after_pr_host_git {
 
   // The per-head retry marker is recorded before the request is made.
   action reserveRetry = all {
-    s.phase == 5, s.bindingTrusted, s.bindingHead == s.remoteHead,
+    s.phase == 5, not(rerunDue(s)), s.bindingTrusted, s.bindingHead == s.remoteHead,
     not(s.retriedHeads.contains(s.remoteHead)),
     record({ ...s, phase: 9,
       retriedHeads: s.retriedHeads.union(Set(s.remoteHead)),
@@ -173,7 +191,7 @@ module after_pr_host_git {
   // A `wait` decision stops the run without merging. Resuming it does not
   // replay the decision: it returns to CI waiting and must rebind the head.
   action waitDecision = all {
-    s.phase == 5, s.bindingTrusted, s.bindingHead == s.remoteHead,
+    s.phase == 5, not(rerunDue(s)), s.bindingTrusted, s.bindingHead == s.remoteHead,
     record({ ...s, phase: 10, waiting: true, blockedAt: s.publications },
       "waitDecision") }
   action resumeWait = all {
@@ -220,8 +238,10 @@ module after_pr_host_git {
     nondet observed = Set(0, 1, 2).oneOf()
     nondet outcome = Set(0, 1, 2, 3).oneOf()
     nondet flag = Set(true, false).oneOf()
+    nondet kind = Set(0, 1, 2).oneOf()
     any {
-      bindCurrent(observed), syncWorkspace, startWaitCI, ciPass, ciFail,
+      bindCurrent(observed), syncWorkspace, startWaitCI, ciPass, ciFail(kind),
+      rerunUnacquired,
       observeConflict(paths), commitConflict(paths, tree), pushConflict,
       suggestRepair(tree), verifyCandidate(observed, tree, flag, flag),
       failedVerification(observed, tree, flag, flag), unresolvedEvidence,
@@ -269,6 +289,20 @@ module after_pr_host_git {
       and s.readinessReadOnly and not(s.readinessBehind)
       and not(s.readinessConflict) and s.readinessHead == s.remoteHead),
     before.retriedHeads.intersect(s.retriedHeads) == before.retriedHeads,
+    // Never more reruns than the limit; resuming or a new head never recounts.
+    0.to(2).forall(h => s.unacquiredReruns.get(h) <= MAX_RERUNS
+      and before.unacquiredReruns.get(h) <= s.unacquiredReruns.get(h)),
+    // A rerun never hides a genuine failure: only a failure made solely of
+    // jobs no runner acquired is rerun, exactly once per counted attempt.
+    event == "rerunUnacquired" implies (before.phase == 5
+      and before.failureKind == 1 and s.phase == 4 and not(s.ciGreen)
+      and s.unacquiredReruns.get(before.remoteHead)
+        == before.unacquiredReruns.get(before.remoteHead) + 1
+      and s.unacquiredReruns.get(before.remoteHead) <= MAX_RERUNS
+      and s.remoteHead == before.remoteHead
+      and s.publications == before.publications),
+    (event == "suggest" or event == "reserveRetry" or event == "waitDecision")
+      implies not(rerunDue(before)),
     s.phase == 9 implies (s.retriedHeads.contains(s.retryHead)
       and s.retryHead == s.remoteHead and s.bindingTrusted
       and s.bindingHead == s.remoteHead),
@@ -351,14 +385,14 @@ module after_pr_host_git {
   run unresolvedEvidenceStopsFurtherPublicationTest = init.then(bindCurrent(0))
     .then(observeConflict(1)).then(commitConflict(1, 1)).then(pushConflict)
     .then(bindCurrent(1)).then(syncWorkspace).then(startWaitCI)
-    .then(ciFail).then(suggestRepair(2))
+    .then(ciFail(0)).then(suggestRepair(2))
     .then(unresolvedEvidence)
     .expect(s.phase == 10 and s.evidenceStatus == 2
       and s.publications == 1 and s.blockedAt == 1 and safety)
   run failedVerificationStopsFurtherPublicationTest = init.then(bindCurrent(0))
     .then(observeConflict(1)).then(commitConflict(1, 1)).then(pushConflict)
     .then(bindCurrent(1)).then(syncWorkspace).then(startWaitCI)
-    .then(ciFail).then(suggestRepair(2))
+    .then(ciFail(0)).then(suggestRepair(2))
     .then(failedVerification(1, 3, false, true))
     .expect(s.phase == 10 and s.evidenceStatus == 2
       and s.publications == 1 and s.blockedAt == 1 and safety)
@@ -371,42 +405,42 @@ module after_pr_host_git {
     .then(bindCurrent(1)).then(observeConflict(2)).then(commitConflict(2, 3)).then(pushConflict)
     .expect(s.remoteHead == 2 and s.remoteTree == 3 and s.publications == 2 and safety)
   run supersededCandidateReturnsToWaitTest = init.then(bindCurrent(0))
-    .then(startWaitCI).then(ciFail).then(suggestRepair(1))
+    .then(startWaitCI).then(ciFail(0)).then(suggestRepair(1))
     .then(verifyCandidate(0, 1, true, true)).then(advanceRemote(1, 2))
     .expect(s.phase == 4 and s.remoteHead == 1 and s.candidateHead == 0
       and s.evidenceHead == 0 and s.publications == 0
       and s.retriedHeads == Set() and safety)
   run workspaceRaceReturnsToWaitTest = init.then(bindCurrent(0))
-    .then(startWaitCI).then(ciFail).then(suggestRepair(1))
+    .then(startWaitCI).then(ciFail(0)).then(suggestRepair(1))
     .then(verifyCandidate(0, 1, true, true)).then(workspaceDrift(2))
     .expect(s.phase == 4 and s.workspaceTree == 2 and s.evidenceTree == 1
       and s.publications == 0 and s.retriedHeads == Set() and safety)
   run verifiedRepairPushLoopsToNewHeadTest = init.then(bindCurrent(0))
-    .then(startWaitCI).then(ciFail).then(suggestRepair(1))
+    .then(startWaitCI).then(ciFail(0)).then(suggestRepair(1))
     .then(verifyCandidate(0, 1, true, true)).then(pushRepair)
     .expect(s.phase == 4 and s.remoteHead == 1 and s.workspaceHead == 1
       and not(s.bindingTrusted) and s.publications == 1 and safety)
   run failedRetryIsTerminalTest = init.then(bindCurrent(0)).then(startWaitCI)
-    .then(ciFail).then(reserveRetry).then(retryResult(1))
+    .then(ciFail(0)).then(reserveRetry).then(retryResult(1))
     .expect(s.phase == 10 and s.retriedHeads.contains(0)
       and s.retryOutcome == 1 and s.publications == 0 and safety)
   run ambiguousRetryIsTerminalTest = init.then(bindCurrent(0)).then(startWaitCI)
-    .then(ciFail).then(reserveRetry).then(retryResult(2))
+    .then(ciFail(0)).then(reserveRetry).then(retryResult(2))
     .expect(s.phase == 10 and s.retriedHeads.contains(0)
       and s.retryOutcome == 2 and s.publications == 0 and safety)
   run waitingRetryIsTerminalTest = init.then(bindCurrent(0)).then(startWaitCI)
-    .then(ciFail).then(reserveRetry).then(retryResult(3))
+    .then(ciFail(0)).then(reserveRetry).then(retryResult(3))
     .expect(s.phase == 10 and s.retriedHeads.contains(0)
       and s.retryOutcome == 3 and s.publications == 0 and safety)
   run successfulRetryWaitsOnSameHeadTest = init.then(bindCurrent(0))
-    .then(startWaitCI).then(ciFail).then(reserveRetry).then(retryResult(0))
+    .then(startWaitCI).then(ciFail(0)).then(reserveRetry).then(retryResult(0))
     .expect(s.phase == 4 and s.remoteHead == 0 and s.candidateHead == -1
       and s.candidateTree == -1 and s.retriedHeads.contains(0)
       and s.publications == 0 and safety)
   run retryNeedsNewFailureAndIsPerHeadTest = init.then(bindCurrent(0))
-    .then(startWaitCI).then(ciFail).then(reserveRetry).then(retryResult(0))
-    .then(ciFail).then(suggestRepair(1)).then(verifyCandidate(0, 1, true, true))
-    .then(pushRepair).then(bindCurrent(1)).then(syncWorkspace).then(startWaitCI).then(ciFail)
+    .then(startWaitCI).then(ciFail(0)).then(reserveRetry).then(retryResult(0))
+    .then(ciFail(0)).then(suggestRepair(1)).then(verifyCandidate(0, 1, true, true))
+    .then(pushRepair).then(bindCurrent(1)).then(syncWorkspace).then(startWaitCI).then(ciFail(0))
     .then(reserveRetry)
     .expect(s.phase == 9 and s.remoteHead == 1
       and s.retriedHeads == Set(0, 1) and s.retryHead == 1 and safety)
@@ -422,14 +456,44 @@ module after_pr_host_git {
     .expect(s.phase == 4 and s.readinessConflict and not(s.readinessAsserted)
       and not(s.nativeMerged) and safety)
   run waitDecisionStopsWithoutMergeTest = init.then(bindCurrent(0))
-    .then(startWaitCI).then(ciFail).then(waitDecision)
+    .then(startWaitCI).then(ciFail(0)).then(waitDecision)
     .expect(s.phase == 10 and s.waiting and not(s.nativeMerged) and safety)
   run resumedWaitRechecksCurrentHeadTest = init.then(bindCurrent(0))
-    .then(startWaitCI).then(ciFail).then(waitDecision).then(resumeWait)
+    .then(startWaitCI).then(ciFail(0)).then(waitDecision).then(resumeWait)
     .then(bindCurrent(0)).then(startWaitCI).then(ciPass)
     .then(assertReadiness(0, false, false)).then(nativeMerge)
     .expect(s.nativeMerged and s.phase == 11 and safety)
   run resumedWaitNeedsGreenCiTest = init.then(bindCurrent(0))
-    .then(startWaitCI).then(ciFail).then(waitDecision).then(resumeWait)
+    .then(startWaitCI).then(ciFail(0)).then(waitDecision).then(resumeWait)
     .then(nativeMerge).fail()
+  run unacquiredRerunThenGreenCiMergesTest = init.then(bindCurrent(0))
+    .then(startWaitCI).then(ciFail(1)).then(rerunUnacquired).then(ciPass)
+    .then(assertReadiness(0, false, false)).then(nativeMerge)
+    .expect(s.nativeMerged and s.unacquiredReruns.get(0) == 1
+      and s.publications == 0 and safety)
+  run unacquiredRerunStopsAtLimitTest = init.then(bindCurrent(0))
+    .then(startWaitCI).then(ciFail(1)).then(rerunUnacquired)
+    .then(ciFail(1)).then(rerunUnacquired).then(ciFail(1))
+    .then(rerunUnacquired).fail()
+  run unacquiredRerunLimitLeavesWaitTest = init.then(bindCurrent(0))
+    .then(startWaitCI).then(ciFail(1)).then(rerunUnacquired)
+    .then(ciFail(1)).then(rerunUnacquired).then(ciFail(1)).then(waitDecision)
+    .expect(s.phase == 10 and s.unacquiredReruns.get(0) == MAX_RERUNS
+      and not(s.nativeMerged) and safety)
+  run genuineOrMixedFailureIsNeverRerunTest = init.then(bindCurrent(0))
+    .then(startWaitCI).then(ciFail(2)).then(rerunUnacquired).fail()
+  run rerunDueSkipsRepairAgentTest = init.then(bindCurrent(0))
+    .then(startWaitCI).then(ciFail(1)).then(waitDecision).fail()
+  run unacquiredRerunCountSurvivesResumeTest = init.then(bindCurrent(0))
+    .then(startWaitCI).then(ciFail(1)).then(rerunUnacquired)
+    .then(ciFail(1)).then(rerunUnacquired).then(ciFail(1)).then(waitDecision)
+    .then(resumeWait).then(bindCurrent(0)).then(startWaitCI).then(ciFail(1))
+    .then(rerunUnacquired).fail()
+  run newHeadGetsItsOwnRerunsTest = init.then(bindCurrent(0))
+    .then(startWaitCI).then(ciFail(1)).then(rerunUnacquired)
+    .then(ciFail(1)).then(rerunUnacquired).then(advanceRemote(1, 1))
+    .then(bindCurrent(1)).then(syncWorkspace).then(startWaitCI).then(ciFail(1))
+    .then(rerunUnacquired)
+    .expect(s.unacquiredReruns.get(0) == MAX_RERUNS
+      and s.unacquiredReruns.get(1) == 1 and safety)
 }

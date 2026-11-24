@@ -177,7 +177,7 @@ steps:
 Conditional cycles are allowed when a normal exit is possible. Execution preflight rejects a reachable cycle only when no normal exit is reachable from the actual start position, considering configured and user-selected skips. A branch that may enter an exitless cycle produces a warning, not a blanket rejection. Runtime edge budgets still apply.
 
 **Constraints:**
-- `if.fail` is rejected at the group level and on every `after-pr` step except native `squash-merge: true`, which accepts only a named jump.
+- `if.fail` is rejected at the group level. In `after-pr`, it is accepted only as a named jump on command steps and on native `squash-merge: true`; prompt steps and `{ retry: true }` are rejected there.
 - On ordinary steps, `if.fail` can be combined with other `if:` keys (`file-changed`, `head-changed`, `no-file-changes`); native squash-merge accepts only its named `if.fail` route.
 
 <a id="quality-gates-quality_gates"></a>

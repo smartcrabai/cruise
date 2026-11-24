@@ -9,12 +9,16 @@ pub fn run(args: &ConfigArgs) -> Result<()> {
     let mut config = crate::app_config::AppConfig::load()?;
     let updating = args.parallelism.is_some()
         || args.auto_requeue_max_attempts.is_some()
+        || args.ci_unacquired_rerun_max_attempts.is_some()
         || args.language.is_some();
     if let Some(parallelism) = args.parallelism {
         config.run_all_parallelism = parallelism;
     }
     if let Some(max) = args.auto_requeue_max_attempts {
         config.run_all_auto_requeue_max_attempts = max;
+    }
+    if let Some(max) = args.ci_unacquired_rerun_max_attempts {
+        config.ci_unacquired_rerun_max_attempts = max;
     }
     if let Some(language) = &args.language {
         config.ui_language = if language.eq_ignore_ascii_case("auto") {
@@ -38,6 +42,9 @@ pub fn run(args: &ConfigArgs) -> Result<()> {
         if let Some(max) = args.auto_requeue_max_attempts {
             println!("run_all_auto_requeue_max_attempts = {max}");
         }
+        if let Some(max) = args.ci_unacquired_rerun_max_attempts {
+            println!("ci_unacquired_rerun_max_attempts = {max}");
+        }
     } else {
         config = config.with_env_overrides()?;
         let source = if std::env::var("CRUISE_RUN_ALL_PARALLELISM")
@@ -54,6 +61,10 @@ pub fn run(args: &ConfigArgs) -> Result<()> {
         println!(
             "run_all_auto_requeue_max_attempts = {}",
             config.run_all_auto_requeue_max_attempts
+        );
+        println!(
+            "ci_unacquired_rerun_max_attempts = {}",
+            config.ci_unacquired_rerun_max_attempts
         );
         println!("prevent_sleep = {}", config.prevent_sleep);
         if let Some(model) = config.model.as_ref() {

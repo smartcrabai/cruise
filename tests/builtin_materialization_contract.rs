@@ -33,13 +33,14 @@ use cruise::workflow_cmd::eject_builtin;
 use cruise::workflow_defaults::WorkflowDefaults;
 
 const WORKER_PHASE: &str = "BUILTIN_MATERIALIZATION_TEST_PHASE";
-const AFTER_PR_IDS: [&str; 8] = [
+const AFTER_PR_IDS: [&str; 9] = [
     "follow-up/pr-ready",
     "follow-up/sync-base",
     "follow-up/resolve-conflict",
     "follow-up/push-after-sync",
     "follow-up/finish-ci-fix",
     "follow-up/wait-ci",
+    "follow-up/rerun-unacquired-ci",
     "follow-up/fix-ci-error",
     "squash-merge",
 ];
@@ -114,7 +115,7 @@ fn assert_after_pr_contract(config: WorkflowConfig) {
             .all(|step| step.squash_merge.is_none())
     );
     for (index, step) in compiled.after_pr.values().enumerate() {
-        let expected: &[&str] = if index == 7 {
+        let expected: &[&str] = if index == 8 {
             &["merge"]
         } else {
             &["after_pr", "merge"]
@@ -130,11 +131,19 @@ fn assert_after_pr_contract(config: WorkflowConfig) {
         assert_eq!(actual, expected);
         assert_eq!(
             step.squash_merge,
-            if index == 7 { Some(true) } else { None }
+            if index == 8 { Some(true) } else { None }
         );
     }
     let wait = &compiled.after_pr["follow-up/wait-ci"];
     assert_eq!(wait.accepted_exit_codes.as_deref(), Some(&[0, 75][..]));
+    // Only a dispatched rerun returns to wait-ci; every refusal reaches repair.
+    let rerun = &compiled.after_pr["follow-up/rerun-unacquired-ci"];
+    assert_eq!(rerun.next.as_deref(), Some("follow-up/wait-ci"));
+    assert!(matches!(
+        rerun.if_condition.as_ref().and_then(|condition| condition.fail.as_ref()),
+        Some(FailAction::Goto(target)) if target == "follow-up/fix-ci-error"
+    ));
+    assert!(rerun.accepted_exit_codes.is_none());
     let fix = &compiled.after_pr["follow-up/fix-ci-error"];
     assert_eq!(fix.next.as_deref(), Some("follow-up/finish-ci-fix"));
     assert_eq!(fix.output_file.as_deref(), Some("ci-followup/result.json"));
@@ -165,7 +174,7 @@ fn assert_after_pr_contract(config: WorkflowConfig) {
     assert_eq!(enabled_ids(FlagValues::new()), [] as [&str; 0]);
     assert_eq!(
         enabled_ids([("after_pr".to_owned(), true)].into()),
-        AFTER_PR_IDS[..7]
+        AFTER_PR_IDS[..8]
     );
     assert_eq!(
         enabled_ids([("merge".to_owned(), true)].into()),
@@ -343,6 +352,15 @@ fn verify_builtin_repair_policy(project: &Path) {
             .as_slice()
             .join("\n");
         assert_eq!(finish_command, "{cruise.bin} internal finish-ci-followup");
+        assert_eq!(
+            config.after_pr["follow-up/rerun-unacquired-ci"]
+                .command
+                .as_ref()
+                .unwrap()
+                .as_slice()
+                .join("\n"),
+            "{cruise.bin} internal rerun-unacquired-ci"
+        );
         assert!(config.after_pr.contains_key("follow-up/finish-ci-fix"));
         assert_eq!(
             config.after_pr["follow-up/wait-ci"]
@@ -731,10 +749,16 @@ fn init_after_pr_repo(project: &Path) {
     }
 }
 
+/// The host refuses an automatic rerun: no runner-unacquired-only failure, or
+/// the per-head limit is spent.
+#[cfg(unix)]
+const REFUSED_RERUN: &str = "printf 'automatic rerun limit reached\\n' >&2; exit 1";
+
 #[cfg(unix)]
 fn builtin_after_pr_fixture(
     project: &Path,
     wait_command: &str,
+    rerun_command: &str,
     repair_command: Option<&str>,
     finish_command: &str,
 ) -> CompiledWorkflow {
@@ -773,6 +797,7 @@ fn builtin_after_pr_fixture(
         } else {
             let command = match name.as_str() {
                 "follow-up/wait-ci" => wait_command,
+                "follow-up/rerun-unacquired-ci" => rerun_command,
                 "follow-up/fix-ci-error" => repair_command.unwrap(),
                 "follow-up/finish-ci-fix" => finish_command,
                 _ => "true",
@@ -798,6 +823,7 @@ fn builtin_after_pr_fixture(
 async fn run_builtin_after_pr(
     project: &Path,
     wait_command: &str,
+    rerun_command: &str,
     repair_command: Option<&str>,
     finish_command: &str,
 ) -> (
@@ -805,7 +831,13 @@ async fn run_builtin_after_pr(
     ExecutionGraph,
     Vec<String>,
 ) {
-    let compiled = builtin_after_pr_fixture(project, wait_command, repair_command, finish_command);
+    let compiled = builtin_after_pr_fixture(
+        project,
+        wait_command,
+        rerun_command,
+        repair_command,
+        finish_command,
+    );
     let mut graph = build_graph(&compiled, MAX_RETRIES).unwrap();
     let started = Mutex::new(Vec::new());
     let on_step_start = |step: &str| {
@@ -862,6 +894,7 @@ async fn verify_builtin_after_pr_behavior(root: &Path) {
     verify_after_pr_green_ci(root).await;
     verify_after_pr_hard_failure_after_prompt(root).await;
     verify_after_pr_no_commit_repair(root).await;
+    verify_after_pr_runner_unacquired_rerun(root).await;
 }
 
 #[cfg(unix)]
@@ -872,6 +905,7 @@ async fn verify_after_pr_green_ci(root: &Path) {
     let (result, graph, started) = run_builtin_after_pr(
         &green,
         "printf 'CI passed\\n' >&2; exit 0",
+        "printf 'unexpected rerun' > rerun-ran",
         Some("printf 'unexpected repair' > repair-ran"),
         "printf 'unexpected finish' > finish-ran",
     )
@@ -882,6 +916,7 @@ async fn verify_after_pr_green_ci(root: &Path) {
     assert!(!started.iter().any(|step| step == "follow-up/finish-ci-fix"));
     assert!(!green.join("finish-ran").exists());
     assert!(!green.join("repair-ran").exists());
+    assert!(!green.join("rerun-ran").exists());
     assert_eq!(graph.state.current.as_deref(), Some("squash-merge"));
 }
 
@@ -897,6 +932,7 @@ async fn verify_after_pr_hard_failure_after_prompt(root: &Path) {
     let (result, _graph, started) = run_builtin_after_pr(
         &hard_failure,
         "printf 'CI_FAILURE: unit-test job failed\\n' >&2; exit 75",
+        REFUSED_RERUN,
         None,
         "printf 'host rejected checkpoint\\n' >&2; exit 1",
     )
@@ -940,6 +976,7 @@ async fn verify_after_pr_no_commit_repair(root: &Path) {
     let (result, graph, started) = run_builtin_after_pr(
         &no_op,
         "printf 'CI_FAILURE: unit-test job failed\\n' >&2; exit 75",
+        REFUSED_RERUN,
         Some("printf 'attempt\\n' >> repair-attempts; printf 'repair made no commit\\n' >&2"),
         "true",
     )
@@ -984,6 +1021,44 @@ async fn verify_after_pr_no_commit_repair(root: &Path) {
     let checkpoint = serde_json::to_string(&graph).unwrap();
     let restored: ExecutionGraph = serde_json::from_str(&checkpoint).unwrap();
     assert_eq!(restored, graph);
+}
+
+/// A dispatched rerun of runner-unacquired jobs returns to `wait-ci` without
+/// the repair prompt, and CI that then passes reaches the native merge.
+#[cfg(unix)]
+async fn verify_after_pr_runner_unacquired_rerun(root: &Path) {
+    let rerun = root.join("runner-unacquired");
+    std::fs::create_dir(&rerun).unwrap();
+    init_after_pr_repo(&rerun);
+    let (result, _graph, started) = run_builtin_after_pr(
+        &rerun,
+        "printf 'wait\\n' >> waits; [ -f reran ] || exit 75",
+        "printf 'rerun\\n' >> reran",
+        Some("printf 'unexpected repair' > repair-ran"),
+        "printf 'unexpected finish' > finish-ran",
+    )
+    .await;
+    assert!(
+        matches!(result, Err(CruiseError::Interrupted)),
+        "{result:?}"
+    );
+    assert!(started.iter().any(|step| step == "squash-merge"));
+    assert_eq!(
+        std::fs::read_to_string(rerun.join("waits"))
+            .unwrap()
+            .lines()
+            .count(),
+        2
+    );
+    assert_eq!(
+        std::fs::read_to_string(rerun.join("reran"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    assert!(!rerun.join("repair-ran").exists());
+    assert!(!rerun.join("finish-ran").exists());
 }
 
 #[cfg(unix)]
