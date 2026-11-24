@@ -340,6 +340,25 @@ pub(crate) fn push_after_sync(plan: &Path, cwd: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Whether the recorded conflict's merge was aborted on an otherwise untouched checkout.
+///
+/// True only when the record is a merge conflict and the checkout is the recorded PR
+/// branch at its pre-merge HEAD with no merge, no unmerged path, and no tracked or
+/// untracked (non-ignored) change. Resuming the host conflict commit can never succeed
+/// from that state, while syncing the base again is safe.
+pub(crate) fn is_aborted_conflict(plan: &Path, cwd: &Path) -> Result<bool> {
+    let Ok(SyncResult::MergeConflict { context, .. }) = read_sync_result(plan) else {
+        return Ok(false);
+    };
+    crate::worktree_pr::ensure_host_git_safety(cwd)?;
+    let root = Path::new(&context.repo_root);
+    Ok(verify_context_checkout(&context, cwd).is_ok()
+        && head(root)? == context.local_base_head
+        && merge_head(root)?.is_none()
+        && unmerged_entries(root)?.is_empty()
+        && worktree_is_clean(root)?)
+}
+
 fn finish_merge(
     plan: &Path,
     cwd: &Path,
@@ -1100,16 +1119,20 @@ fn ensure_no_merge(root: &Path) -> Result<()> {
 }
 
 fn ensure_clean_worktree(root: &Path, message: &str) -> Result<()> {
+    if worktree_is_clean(root)? {
+        Ok(())
+    } else {
+        Err(other(message))
+    }
+}
+
+fn worktree_is_clean(root: &Path) -> Result<bool> {
     let status = git(
         root,
         &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
     )?
     .stdout;
-    if status.is_empty() {
-        Ok(())
-    } else {
-        Err(other(message))
-    }
+    Ok(status.is_empty())
 }
 
 fn repository_root(repo_dir: &Path) -> Result<PathBuf> {
@@ -1508,7 +1531,7 @@ fn other(message: impl Into<String>) -> CruiseError {
     CruiseError::Other(message.into())
 }
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
@@ -1539,16 +1562,16 @@ mod tests {
         }
     }
 
-    struct ConflictFixture {
+    pub(crate) struct ConflictFixture {
         _git_environment: HostSyncGitEnvironment,
         _temp: TempDir,
-        repo: PathBuf,
-        plan: PathBuf,
+        pub(crate) repo: PathBuf,
+        pub(crate) plan: PathBuf,
         context: SyncContext,
         merge_head: String,
     }
 
-    fn conflict_fixture() -> ConflictFixture {
+    pub(crate) fn conflict_fixture() -> ConflictFixture {
         let git_environment = isolated_host_git_environment();
         let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("create fixture: {error}"));
         let repo = temp.path().join("repo");
@@ -1650,7 +1673,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("run git {args:?}: {error}"))
     }
 
-    fn git_ok(repo: &Path, args: &[&str]) -> Output {
+    pub(crate) fn git_ok(repo: &Path, args: &[&str]) -> Output {
         let output = git_output(repo, args);
         assert!(
             output.status.success(),
@@ -2283,5 +2306,64 @@ esac
             remote_oid,
             head(&repo).unwrap_or_else(|error| panic!("read pushed HEAD: {error}"))
         );
+    }
+
+    fn aborted(fixture: &ConflictFixture) -> bool {
+        is_aborted_conflict(&fixture.plan, &fixture.repo)
+            .unwrap_or_else(|error| panic!("classify recorded conflict: {error}"))
+    }
+
+    #[test]
+    fn aborted_merge_on_untouched_checkout_is_an_aborted_conflict() {
+        let fixture = conflict_fixture();
+        assert!(
+            !aborted(&fixture),
+            "an active merge is resumable as recorded"
+        );
+
+        git_ok(&fixture.repo, &["merge", "--abort"]);
+        fs::create_dir_all(fixture.repo.join(".cache"))
+            .unwrap_or_else(|error| panic!("create ignored cache: {error}"));
+        fs::write(fixture.repo.join(".cache/results.json"), "{}\n")
+            .unwrap_or_else(|error| panic!("write ignored cache: {error}"));
+        assert!(
+            aborted(&fixture),
+            "ignored churn must not block a fresh sync"
+        );
+        assert!(
+            matches!(
+                read_sync_result(&fixture.plan),
+                Ok(SyncResult::MergeConflict { .. })
+            ),
+            "classification must not change the record"
+        );
+    }
+
+    #[test]
+    fn aborted_merge_with_local_changes_is_not_an_aborted_conflict() {
+        type Change = fn(&ConflictFixture);
+        let cases: [(&str, Change); 4] = [
+            ("tracked edit", |fixture| {
+                fs::write(fixture.repo.join("unrelated.txt"), "local edit\n")
+                    .unwrap_or_else(|error| panic!("edit tracked file: {error}"));
+            }),
+            ("untracked file", |fixture| {
+                fs::write(fixture.repo.join("stray.txt"), "stray\n")
+                    .unwrap_or_else(|error| panic!("write untracked file: {error}"));
+            }),
+            ("moved HEAD", |fixture| {
+                git_ok(&fixture.repo, &["commit", "--allow-empty", "-m", "moved"]);
+            }),
+            ("cleared record", |fixture| {
+                write_sync_result(&fixture.plan, &SyncResult::Cleared)
+                    .unwrap_or_else(|error| panic!("clear record: {error}"));
+            }),
+        ];
+        for (case, change) in cases {
+            let fixture = conflict_fixture();
+            git_ok(&fixture.repo, &["merge", "--abort"]);
+            change(&fixture);
+            assert!(!aborted(&fixture), "{case} must keep the recorded failure");
+        }
     }
 }

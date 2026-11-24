@@ -676,6 +676,93 @@ pub struct AfterPrCheckpoint<'a> {
     pub resume: Option<AfterPrResume<'a>>,
 }
 
+const FINISH_CONFLICT_COMMIT_COMMAND: &str = "{cruise.bin} internal finish-conflict-commit";
+const SYNC_BASE_COMMAND: &str = "{cruise.bin} internal sync-base";
+
+fn runs_command(step: &crate::config::StepConfig, command: &str) -> bool {
+    match &step.command {
+        Some(crate::config::StringOrVec::Single(line)) => line.contains(command),
+        Some(crate::config::StringOrVec::Multiple(lines)) => {
+            lines.iter().any(|line| line.contains(command))
+        }
+        None => false,
+    }
+}
+
+/// Name the base-sync step to resume from when a saved conflict commit can no longer run.
+///
+/// A failed host conflict commit stays bound to its recorded `MERGE_HEAD`; once that
+/// merge is aborted, resuming the commit always fails. When the checkout is provably
+/// clean at the recorded pre-merge HEAD, resume restarts at the single after-PR step
+/// that runs `internal sync-base`, which replaces the stale record itself.
+fn aborted_conflict_rewind(
+    after_compiled: &CompiledWorkflow,
+    dag: &crate::graph::ExecutionGraph,
+    resume: &AfterPrResume<'_>,
+    vars: &VariableStore,
+    working_dir: &Path,
+) -> Result<Option<String>> {
+    let saved_name = if resume.is_node_id {
+        resume
+            .saved_step
+            .and_then(|id| dag.nodes.get(id))
+            .map(|node| node.step_name.as_str())
+    } else {
+        resume.saved_step
+    };
+    let Some(saved) = saved_name.and_then(|name| after_compiled.steps.get(name)) else {
+        return Ok(None);
+    };
+    if !runs_command(saved, FINISH_CONFLICT_COMMIT_COMMAND) {
+        return Ok(None);
+    }
+    let mut sync_steps = after_compiled
+        .steps
+        .iter()
+        .filter(|(_, step)| runs_command(step, SYNC_BASE_COMMAND));
+    let (Some((sync_step, _)), None) = (sync_steps.next(), sync_steps.next()) else {
+        return Ok(None);
+    };
+    let Some(plan) = saved.env.get("CRUISE_SYNC_PLAN") else {
+        return Ok(None);
+    };
+    let plan = std::path::PathBuf::from(vars.resolve(plan)?);
+    if !crate::host_sync::is_aborted_conflict(&plan, working_dir)? {
+        return Ok(None);
+    }
+    Ok(Some(sync_step.clone()))
+}
+
+/// Restore the after-PR checkpoint at its saved node, or at base sync after an aborted merge.
+fn resume_after_pr_graph(
+    dag: &mut crate::graph::ExecutionGraph,
+    after_compiled: &CompiledWorkflow,
+    resume: &AfterPrResume<'_>,
+    execution_id: Option<&str>,
+    vars: &VariableStore,
+    working_dir: &Path,
+) -> Result<String> {
+    let rewind = aborted_conflict_rewind(after_compiled, dag, resume, vars, working_dir)?;
+    let (saved_step, is_node_id) = match rewind.as_deref() {
+        Some(sync_step) => (Some(sync_step), false),
+        None => (resume.saved_step, resume.is_node_id),
+    };
+    let start = crate::graph::persistence::prepare_resume(
+        dag,
+        resume.path,
+        true,
+        saved_step,
+        is_node_id,
+        execution_id,
+    )?;
+    if let Some(sync_step) = rewind {
+        crate::status_eprintln!(
+            "the recorded base-sync merge is no longer active; resuming after-PR from {sync_step}"
+        );
+    }
+    Ok(start)
+}
+
 #[expect(clippy::too_many_arguments, reason = "mirrors the PR flow parameters")]
 #[cfg(test)]
 pub(crate) async fn run_after_pr_steps(
@@ -766,13 +853,13 @@ pub(crate) async fn run_after_pr_steps_with_checkpoint(
                     "after-pr checkpoint has no matching execution identity; explicitly restart the session".into(),
                 ));
             }
-            crate::graph::persistence::prepare_resume(
+            resume_after_pr_graph(
                 &mut dag,
-                resume.path,
-                true,
-                resume.saved_step,
-                resume.is_node_id,
+                &after_compiled,
+                &resume,
                 cp.execution_id,
+                vars,
+                working_dir,
             )?
         } else {
             dag.state.execution_id = cp.execution_id.map(str::to_owned);
@@ -3758,5 +3845,97 @@ mod tests {
             "after-pr must propagate a missing-model error instead of warning and succeeding: {result:?}"
         );
         assert!(tmp.path().join(".config/cruise/default.yaml").is_file());
+    }
+}
+
+#[cfg(test)]
+mod aborted_conflict_resume_tests {
+    use std::path::Path;
+
+    use crate::file_tracker::FileTracker;
+    use crate::host_sync::tests::{conflict_fixture, git_ok};
+    use crate::variable::VariableStore;
+
+    use super::{AfterPrCheckpoint, AfterPrResume, run_after_pr_steps_with_checkpoint};
+
+    /// Resume a checkpoint saved at the conflict-commit step and return the step order.
+    async fn resume_from_conflict_commit(repo: &Path, plan: &Path) -> Vec<String> {
+        let log = plan.with_file_name("order.log");
+        let yaml = format!(
+            "command: [echo]\nsteps:\n  main:\n    command: 'true'\nafter-pr:\n  sync-base:\n    command: 'echo sync >> {log} # {{cruise.bin}} internal sync-base'\n  push-after-sync:\n    env:\n      CRUISE_SYNC_PLAN: \"{{plan}}\"\n    command: 'echo push >> {log} # {{cruise.bin}} internal finish-conflict-commit'\n",
+            log = log.display()
+        );
+        let compiled = crate::workflow::compile(
+            crate::config::WorkflowConfig::from_yaml(&yaml)
+                .unwrap_or_else(|error| panic!("parse workflow: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("compile workflow: {error}"));
+        let mut graph = crate::graph::build_graph(&compiled.to_after_pr_compiled(), 10)
+            .unwrap_or_else(|error| panic!("build graph: {error}"));
+        let push = graph
+            .first_node_for_step("push-after-sync")
+            .cloned()
+            .unwrap_or_else(|| panic!("push node"));
+        graph.state.current = Some(push.clone());
+        graph.state.execution_id = Some("exec".into());
+        let checkpoint = plan.with_file_name("after-pr-dag.json");
+        crate::graph::persistence::save_graph(&graph, &checkpoint)
+            .unwrap_or_else(|error| panic!("save checkpoint: {error}"));
+
+        let mut vars = VariableStore::new("task".into());
+        vars.set_named_file("plan", plan.to_path_buf());
+        let mut tracker = FileTracker::with_root(repo.to_path_buf());
+        run_after_pr_steps_with_checkpoint(
+            &compiled,
+            None,
+            &mut vars,
+            &mut tracker,
+            10,
+            0,
+            repo,
+            &[],
+            &crate::flags::NO_FLAGS,
+            None,
+            &crate::option_handler::NoOpOptionHandler,
+            None,
+            None,
+            None,
+            Some(AfterPrCheckpoint {
+                execution_id: Some("exec"),
+                resume: Some(AfterPrResume {
+                    path: &checkpoint,
+                    saved_step: Some(&push),
+                    is_node_id: true,
+                }),
+            }),
+            &|_, _| Ok(()),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("resume after-pr: {error}"));
+        // Windows `cmd` echoes the trailing `# ...` marker too, so keep only the first word.
+        std::fs::read_to_string(&log)
+            .unwrap_or_else(|error| panic!("read order: {error}"))
+            .lines()
+            .filter_map(|line| line.split_whitespace().next().map(str::to_owned))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn resume_after_aborted_conflict_restarts_at_base_sync() {
+        let fixture = conflict_fixture();
+        git_ok(&fixture.repo, &["merge", "--abort"]);
+
+        let order = resume_from_conflict_commit(&fixture.repo, &fixture.plan).await;
+
+        assert_eq!(order, ["sync", "push"]);
+    }
+
+    #[tokio::test]
+    async fn resume_with_active_conflict_merge_keeps_the_saved_step() {
+        let fixture = conflict_fixture();
+
+        let order = resume_from_conflict_commit(&fixture.repo, &fixture.plan).await;
+
+        assert_eq!(order, ["push"]);
     }
 }
