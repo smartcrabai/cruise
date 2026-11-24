@@ -166,6 +166,7 @@ WebUI 的 Directory 来源提供 **Exec** 按钮，启用 `force_exec` 时则显
 - 对于有 PR 的会话，工作树会保留到 PR 关闭或合并；运行 `cruise clean` 可将其删除。没有 PR 的符合条件的会话可以改用本地合并清理。
 - 在配置中设置 `cleanup_after_pr: true`（或运行时传入 `--cleanup-after-pr`），可在创建 PR 后立即自动删除本地工作树和分支。使用 `--no-cleanup-after-pr` 可覆盖配置并保留它们。
 - 显式选择 **Merge locally & cleanup** 也会在 squash 提交后删除符合条件的本地工作树和分支，且不受 `cleanup_after_pr` 影响。
+- 工作树或 `--repo` 克隆会话完成时，Cruise 会先把工作区中未跟踪和已忽略的测试证据复制到 `<data_dir>/sessions/<id>/artifacts/evidence/`，因此删除工作树后仍会保留。只复制 `.png`、`.jpg`、`.jpeg`、`.gif`、`.webp`、`.md`、`.txt` 和 `.log` 文件，并跳过 `node_modules`、虚拟环境等依赖或缓存目录。上限为单个文件 5 MiB、每个会话 25 MiB 和 100 个文件；优先复制图片，跳过的文件及原因记录在 `artifacts/evidence.md` 中。清单路径会显示在运行日志、WebUI 的 **Info** 标签页和 `cruise list` 的会话视图中。证据只保存在本机，不会添加到 PR。当前分支会话的工作区不会被删除，因此不复制。
 
 除非在用户或项目的 `default.yaml` 中设置了 `base_branch`，否则新工作树会从仓库当前的 HEAD 开始。有配置的 base 时，Cruise 优先使用本地分支，其次使用 `origin/<base>`；若设置了 `auto_fetch: true`，则只从 `origin` 获取该分支，并优先使用更新后的远程跟踪引用。获取失败会发出警告并回退到本地引用；找不到 base 会报错。配置的 base 会随会话保存，并用作 PR 或 MR 的目标；如果没有配置，forge CLI 会选择其默认目标。已有工作树会被复用，不会再次获取或解析 base。
 

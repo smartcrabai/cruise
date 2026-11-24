@@ -129,7 +129,16 @@ pub fn read(root: &Path, name: &str) -> Result<String> {
 /// prepared, the content exceeds [`MAX_ARTIFACT_SIZE`], or the atomic write
 /// cannot complete. A failed replacement leaves an existing artifact intact.
 pub fn write(root: &Path, name: &str, content: &str) -> Result<()> {
-    if content.len() > MAX_ARTIFACT_SIZE {
+    write_bytes(root, name, content.as_bytes(), MAX_ARTIFACT_SIZE)
+}
+
+/// Atomically save binary artifact content no larger than `max_size` bytes.
+///
+/// # Errors
+///
+/// Same as [`write`], with `max_size` as the size limit.
+pub(crate) fn write_bytes(root: &Path, name: &str, content: &[u8], max_size: usize) -> Result<()> {
+    if content.len() > max_size {
         return Err(size_error(name));
     }
 
@@ -147,7 +156,7 @@ pub fn write(root: &Path, name: &str, content: &str) -> Result<()> {
             .write(true)
             .create_new(true)
             .open(&temporary)?;
-        file.write_all(content.as_bytes())?;
+        file.write_all(content)?;
         file.flush()?;
         file.sync_all()?;
         fs::rename(&temporary, &path)

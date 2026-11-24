@@ -24,6 +24,8 @@ For each applicable UI flow, assess and deliver these separately whenever availa
 
 One actual E2E run can satisfy both capabilities when it produces screenshots that are saved and pixel-inspected; do not duplicate a run solely to satisfy both, and no pixel-diff/golden test is required. Unit tests, DOM-only tests, mocks, parser-only runs, and screenshot capture without pixel inspection do not substitute for the capabilities above.
 
+Save screenshots and E2E reports inside the workspace, for example in the runner's ignored output directory, not in a temporary directory outside it. When a worktree or `--repo` clone session completes, Cruise copies untracked `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.md`, `.txt`, and `.log` files up to 5 MiB each into the session record, so they survive worktree removal; report the workspace-relative paths.
+
 If only one capability is available, complete reachable work and report the missing capability or exact blocker; do not claim both. Work each target and capability independently so one blocker does not stop feasible work elsewhere. Never claim a fake pass or call a target not applicable merely because tooling is absent. Report unavailable capability, exact prerequisite, completed reachable work, and any unverified scope honestly.
 Run prepared E2E suites and checks needed to diagnose failures. Fix genuine application defects without weakening assertions, then rerun affected checks. If no in-scope UI target exists, report not applicable with repository evidence and do not add a fake suite. Never use live external credentials or production services.
 

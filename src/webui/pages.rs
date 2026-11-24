@@ -214,6 +214,10 @@ pub(crate) fn tab_panel_html(state: &WebState, id: &str, tab: &str) -> Result<St
                 Ok(rows) => (rows, None),
                 Err(_) => (Vec::new(), Some("Unavailable".to_string())),
             };
+            let evidence_manifest = session_state
+                .evidence_manifest
+                .as_deref()
+                .map(|path| path.display().to_string());
             let session = super::dto::session_dto(&state.application, session_state, true);
             let pr_is_link = session
                 .pr_url
@@ -242,6 +246,7 @@ pub(crate) fn tab_panel_html(state: &WebState, id: &str, tab: &str) -> Result<St
                 completed_at: session.completed_at.as_deref().map(format_local_time),
                 pr_url: session.pr_url.clone(),
                 pr_is_link,
+                evidence_manifest,
                 phase_error: session.phase_error.clone(),
                 plan_error: session
                     .plan_error

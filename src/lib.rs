@@ -32,6 +32,7 @@ mod draft_cmd;
 mod e2e_guard;
 pub mod engine;
 pub mod error;
+pub mod evidence;
 mod exec_cmd;
 pub mod executor;
 pub mod file_tracker;
