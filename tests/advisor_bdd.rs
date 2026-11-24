@@ -165,7 +165,11 @@ steps:
             &["add", "README.md"],
             &["commit", "-m", "initial"],
         ] {
-            let output = Command::new("git").args(args).current_dir(&repo).output().unwrap();
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
             assert!(output.status.success(), "fixture git {args:?}: {output:?}");
         }
         fs::create_dir(root.join("artifacts")).unwrap();

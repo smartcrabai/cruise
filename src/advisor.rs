@@ -27,14 +27,7 @@ pub(crate) fn prepare(
     let root = artifacts_root.ok_or_else(|| {
         CruiseError::Other("cannot prepare advisor diff without a session artifacts root".into())
     })?;
-    let fallback;
-    let working_dir = match working_dir {
-        Some(dir) => dir,
-        None => {
-            fallback = std::env::current_dir()?;
-            &fallback
-        }
-    };
+    let working_dir = working_dir.unwrap_or(Path::new("."));
     let name = format!("{output_file}.diff");
     let diff = branch_diff::worktree_diff(working_dir, "HEAD", DIFF_CAP)?;
     let mut text = diff.stat;

@@ -136,7 +136,9 @@ fn command_advisor_dry_run_accepts_explicit_user_skip() -> cruise::error::Result
     use cruise::session_config::SessionConfigRef;
     let f = Fixture::new();
     let manager = SessionManager::new(f.root.path().join("data/cruise"));
-    std::fs::write(&f.config, r"
+    std::fs::write(
+        &f.config,
+        r"
 command: [cat]
 flags:
   advisor: {}
@@ -148,13 +150,24 @@ steps:
     flag: advisor
     prompt: Inspect
     output_file: advice.md
-")?;
+",
+    )?;
     let id = SessionManager::new_session_id();
-    let mut state = SessionState::new(id.clone(), f.repo.clone(), SessionConfigRef::File { path: f.config.clone() }, "advisor dry run".into());
+    let mut state = SessionState::new(
+        id.clone(),
+        f.repo.clone(),
+        SessionConfigRef::File {
+            path: f.config.clone(),
+        },
+        "advisor dry run".into(),
+    );
     state.phase = SessionPhase::Planned;
     state.skipped_steps = vec!["inspect".into()];
     manager.create(&state)?;
-    let out = f.cli().args(["run", &id, "--dry-run", "-f", "advisor"]).output()?;
+    let out = f
+        .cli()
+        .args(["run", &id, "--dry-run", "-f", "advisor"])
+        .output()?;
     assert!(out.status.success(), "{}", text(&out));
     Ok(())
 }

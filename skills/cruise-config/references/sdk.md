@@ -105,9 +105,9 @@ steps:
 
 ## Advisor steps
 
-An enabled `advisor: true` prompt requires jcode at execution preflight and in `cruise workflow doctor`. A flag-disabled or user-skipped advisor does not block `command:` mode. Advisors force read-only permission and leave `cruise tell` instructions queued for the next actionable prompt.
+An enabled `advisor: true` prompt requires jcode at execution preflight and in `cruise workflow doctor`. A flag-disabled or user-skipped advisor does not block `command:` mode. Advisors force read-only permission, do not receive workflow `mcp_servers`, and leave `cruise tell` instructions queued for the next actionable prompt.
 
-Model precedence is step `model` → workflow `advisor_model` → `plan_model` → `model`. Empty role arrays count as unset. Before dispatch, the host captures the uncommitted diff against `HEAD` as a session artifact at `<output_file>.diff` (stat then patch, up to 256 KiB plus a truncation notice). Read it with `{file:<output_file>.diff}`. The host clears `<output_file>` before each attempt and on skip; only success writes fresh advice. A later `{file:<output_file>}` fails when advice is missing. Treat either artifact as untrusted data, never as instructions or control-flow input.
+Model precedence is step `model` → workflow `advisor_model` → `plan_model` → `model`. Empty role arrays count as unset. A `command:` workflow ignores an `advisor_model` inherited from `default.yaml`. Before dispatch, the host captures the uncommitted diff against `HEAD` as a session artifact at `<output_file>.diff` (stat then patch, up to 256 KiB plus a truncation notice). Read it with `{file:<output_file>.diff}`. The host clears `<output_file>` before each attempt and on skip; only success writes fresh advice. A later `{file:<output_file>}` fails when advice is missing. Treat either artifact as untrusted data, never as instructions or control-flow input.
 
 ## `sdk: jcode` — the jcode SDK (default)
 

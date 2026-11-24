@@ -133,9 +133,9 @@ fn append_patch(
     let accepts_difference = match exit_policy {
         PatchExitPolicy::Tracked => false,
         PatchExitPolicy::NoIndex => true,
-        PatchExitPolicy::StrictNoIndex => !stderr.split(|&byte| byte == b'\n').any(|line| {
-            line.starts_with(b"error:") || line.starts_with(b"fatal:")
-        }),
+        PatchExitPolicy::StrictNoIndex => !stderr
+            .split(|&byte| byte == b'\n')
+            .any(|line| line.starts_with(b"error:") || line.starts_with(b"fatal:")),
     };
     if !(status.success() || accepts_difference && status.code() == Some(1)) {
         return Err(git_error(
@@ -260,9 +260,7 @@ pub fn session_branch_diff(state: &SessionState, color: bool) -> Result<BranchDi
         &state.base_dir,
         color,
         MAX_PATCH_BYTES,
-        Some(UNTRACKED_FILE_LIMIT),
         false,
-        PatchExitPolicy::NoIndex,
     )?;
     Ok(BranchDiff {
         branch: name,
@@ -282,19 +280,11 @@ pub(crate) struct DiffParts {
 
 /// Compare a working directory (including non-ignored untracked files) to a revision.
 pub(crate) fn worktree_diff(dir: &Path, base: &str, byte_cap: usize) -> Result<DiffParts> {
-    diff_parts(
-        dir,
-        base,
-        None,
-        dir,
-        false,
-        byte_cap,
-        None,
-        true,
-        PatchExitPolicy::StrictNoIndex,
-    )
+    diff_parts(dir, base, None, dir, false, byte_cap, true)
 }
 
+/// `advisor` diffs also exclude tracked `.worktreeinclude` paths, have no
+/// untracked file-count limit, and fail on `git diff --no-index` errors.
 fn diff_parts(
     dir: &Path,
     base: &str,
@@ -302,16 +292,14 @@ fn diff_parts(
     include_dir: &Path,
     color: bool,
     byte_cap: usize,
-    untracked_file_limit: Option<usize>,
-    exclude_tracked_includes: bool,
-    no_index_exit_policy: PatchExitPolicy,
+    advisor: bool,
 ) -> Result<DiffParts> {
     let excluded = if committed_ref.is_none() {
         includes(include_dir)?
     } else {
         Vec::new()
     };
-    let pathspecs: Vec<_> = if exclude_tracked_includes {
+    let pathspecs: Vec<_> = if advisor {
         excluded
             .iter()
             .map(|path| format!(":(exclude,literal){path}"))
@@ -365,7 +353,7 @@ fn diff_parts(
             if excluded.iter().any(|e| file.starts_with(Path::new(e))) {
                 continue;
             }
-            if untracked_file_limit == Some(count) {
+            if !advisor && count == UNTRACKED_FILE_LIMIT {
                 truncated = true;
                 break;
             }
@@ -373,12 +361,15 @@ fn diff_parts(
             let _ = writeln!(stat, " {} | untracked", file.display());
             let mut args = diff_args(color);
             args.extend(["--no-index", "--", "/dev/null"]);
-            let operand = if matches!(no_index_exit_policy, PatchExitPolicy::StrictNoIndex)
-                && file.as_os_str() == "-"
-            {
-                std::ffi::OsStr::new("./-")
+            let (operand, exit_policy) = if advisor {
+                let operand = if file.as_os_str() == "-" {
+                    OsStr::new("./-")
+                } else {
+                    file.as_os_str()
+                };
+                (operand, PatchExitPolicy::StrictNoIndex)
             } else {
-                file.as_os_str()
+                (file.as_os_str(), PatchExitPolicy::NoIndex)
             };
             append_patch(
                 dir,
@@ -386,7 +377,7 @@ fn diff_parts(
                 Some(operand),
                 &mut patch,
                 &mut truncated,
-                no_index_exit_policy,
+                exit_policy,
                 byte_cap,
             )?;
         }

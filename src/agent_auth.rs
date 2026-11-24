@@ -151,9 +151,10 @@ pub(crate) fn ensure_agents_authenticated(
     }
     let candidates = match scope {
         AuthScope::Planning => crate::config::planning_model_candidates(config),
-        AuthScope::Execution { flags, skipped_steps } => {
-            crate::config::execution_model_candidates(config, flags, skipped_steps)
-        }
+        AuthScope::Execution {
+            flags,
+            skipped_steps,
+        } => crate::config::execution_model_candidates(config, flags, skipped_steps),
     };
     let mut targets = Vec::new();
     for candidate in candidates {

@@ -1867,7 +1867,7 @@ pub(crate) async fn run_prompt_step(
         permission,
     );
     let mcp_servers = if advisor {
-        Default::default()
+        crate::config::McpServers::default()
     } else {
         tool_policy.filter_mcp_servers(&compiled.mcp_servers)
     };
@@ -1914,8 +1914,8 @@ pub(crate) async fn run_prompt_step(
     // reason here and we read it back once the turn ends, no UI round-trip
     // needed. Only populated with a tool when `register_skip_tool` is set --
     // see the doc comment above for why this can't be unconditional.
-    let skip_reason_store = (register_skip_tool && !advisor)
-        .then(|| Arc::new(std::sync::Mutex::new(None)));
+    let skip_reason_store =
+        (register_skip_tool && !advisor).then(|| Arc::new(std::sync::Mutex::new(None)));
     let tools = skip_reason_store.as_ref().map_or_else(Vec::new, |store| {
         vec![crate::sdk_tools::skip_step_tool(Arc::clone(store))]
     });
@@ -2075,8 +2075,8 @@ pub(crate) async fn run_prompt_step(
         None
     };
 
-    let skip_step_reason = skip_reason_store
-        .and_then(|store| store.lock().ok().and_then(|mut guard| guard.take()));
+    let skip_step_reason =
+        skip_reason_store.and_then(|store| store.lock().ok().and_then(|mut guard| guard.take()));
     Ok((skip_step_reason, advice))
 }
 

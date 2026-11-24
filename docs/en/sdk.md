@@ -59,9 +59,9 @@ The subagent model must resolve to a valid, nonempty model.
 <a id="advisor-steps"></a>
 ### Advisor steps
 
-Use `advisor: true` on an ordinary prompt step directly under `steps` (including steps inlined there by `workflow_call`). It requires `output_file`, forbids `allow_commit: true`, and forces [read-only permission](#permission-modes) regardless of the workflow default. Omit step `permission` or set it to `read-only`.
+Use `advisor: true` on an ordinary prompt step directly under `steps` (including steps inlined there by `workflow_call`). It requires `output_file`, forbids `allow_commit: true`, and forces [read-only permission](#permission-modes) regardless of the workflow default. Omit step `permission` or set it to `read-only`. Advisor turns do not receive workflow [`mcp_servers`](#mcp-servers-mcp_servers).
 
-Model selection is step `model` → `advisor_model` → `plan_model` → workflow `model`. Empty role lists count as unset. Like `plan_model`, `advisor_model` accepts a model string or a fallback array with optional `disabled_during` entries. Set it in the workflow or a user/project `default.yaml`, or override it with `CRUISE_ADVISOR_MODEL` (a string or JSON array). It is not a `cruise config` setting. Other prompts are unaffected.
+Model selection is step `model` → `advisor_model` → `plan_model` → workflow `model`. Empty role lists count as unset. Like `plan_model`, `advisor_model` accepts a model string or a fallback array with optional `disabled_during` entries. Set it in the workflow or a user/project `default.yaml`, or override it with `CRUISE_ADVISOR_MODEL` (a string or JSON array). A `command:` workflow ignores an `advisor_model` inherited from `default.yaml`. It is not a `cruise config` setting. Other prompts are unaffected.
 
 An enabled advisor requires jcode. Execution preflight (including dry runs) exempts flag-disabled and explicitly user-skipped advisors from this check. `cruise workflow doctor` applies flag skips only. Advisors do not consume instructions queued by `cruise tell`.
 

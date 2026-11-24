@@ -53,9 +53,9 @@ jcode 子智能体模型必须解析为有效的非空模型。
 <a id="advisor-steps"></a>
 ### 顾问步骤
 
-`advisor: true` 只能用于顶层 `steps` 下的普通提示步骤，包括通过 `workflow_call` 内联到此处的步骤。必须设置 `output_file`，且不得设置 `allow_commit: true`。无论工作流的默认权限是什么，该步骤都会强制使用[只读权限](#permission-modes)。请省略步骤的 `permission` 或设为 `read-only`。
+`advisor: true` 只能用于顶层 `steps` 下的普通提示步骤，包括通过 `workflow_call` 内联到此处的步骤。必须设置 `output_file`，且不得设置 `allow_commit: true`。无论工作流的默认权限是什么，该步骤都会强制使用[只读权限](#permission-modes)。请省略步骤的 `permission` 或设为 `read-only`。顾问步骤不会接收工作流的 [`mcp_servers`](#mcp-servers-mcp_servers)。
 
-模型按步骤 `model` → `advisor_model` → `plan_model` → 工作流 `model` 的顺序选择，空数组视为未设置。与 `plan_model` 一样，`advisor_model` 接受模型字符串，或包含可选 `disabled_during` 项的回退数组。可在工作流或用户／项目的 `default.yaml` 中设置，也可用 `CRUISE_ADVISOR_MODEL`（字符串或 JSON 数组）覆盖。它不是 `cruise config` 的设置项，也不影响其他提示。
+模型按步骤 `model` → `advisor_model` → `plan_model` → 工作流 `model` 的顺序选择，空数组视为未设置。与 `plan_model` 一样，`advisor_model` 接受模型字符串，或包含可选 `disabled_during` 项的回退数组。可在工作流或用户／项目的 `default.yaml` 中设置，也可用 `CRUISE_ADVISOR_MODEL`（字符串或 JSON 数组）覆盖。`command:` 工作流会忽略从 `default.yaml` 继承的 `advisor_model`。它不是 `cruise config` 的设置项，也不影响其他提示。
 
 启用的顾问步骤需要 jcode。执行前检查（包括试运行）会豁免因标志关闭或被用户明确跳过的顾问步骤。`cruise workflow doctor` 只应用基于标志的跳过。顾问不会消耗 `cruise tell` 排队的指令。
 

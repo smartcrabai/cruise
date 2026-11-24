@@ -490,7 +490,9 @@ impl WorkflowDefaults {
                 "advisor_model",
                 self.advisor_model
                     .as_ref()
-                    .filter(|_| workflow_backend != BackendClass::Command && config.advisor_model.is_none())
+                    .filter(|_| {
+                        workflow_backend != BackendClass::Command && config.advisor_model.is_none()
+                    })
                     .map(|s| s.path.as_path()),
             ),
             (
@@ -540,6 +542,10 @@ impl WorkflowDefaults {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "flat list of per-field default copies"
+    )]
     fn fill_fields(&self, config: &mut WorkflowConfig, presence: WorkflowConfigPresence) {
         if config.commit_message_template.is_none() {
             config
@@ -570,9 +576,8 @@ impl WorkflowDefaults {
         if config.plan_model.is_none() {
             config.plan_model = self.plan_model.as_ref().map(|s| s.value.clone());
         }
-        if config.advisor_model.is_none()
-            && classify_backend(config.sdk.as_deref(), &config.command).0 != BackendClass::Command
-        {
+        // A command workflow cannot run advisors, so it ignores this default.
+        if config.advisor_model.is_none() && config.command.is_empty() {
             config.advisor_model = self.advisor_model.as_ref().map(|s| s.value.clone());
         }
         if config.max_retries.is_none() {
@@ -1071,45 +1076,67 @@ mod tests {
     fn advisor_model_default_allows_explicit_command_backend() {
         let env = env();
         let schedule = "advisor_model: [{model: openai/a, disabled_during: ['mon-fri 01:00-04:00']}, claude/b]";
-        write(
-            &env.project_file,
-            &format!("sdk: jcode\n{schedule}\n"),
-        );
+        write(&env.project_file, &format!("sdk: jcode\n{schedule}\n"));
         let defaults = WorkflowDefaults::load(Some(env.project.path()))
             .unwrap_or_else(|error| panic!("{error}"));
         let ordinary = "command: [echo]\nsteps:\n  inspect:\n    prompt: inspect\n";
-        let advisor = format!("flags:\n  advisor: {{}}\n{ordinary}  advise:\n    prompt: review\n    advisor: true\n    flag: advisor\n    output_file: advice.md\n");
+        let advisor = format!(
+            "flags:\n  advisor: {{}}\n{ordinary}  advise:\n    prompt: review\n    advisor: true\n    flag: advisor\n    output_file: advice.md\n"
+        );
         let resolve = |yaml| {
-            let mut resolution = WorkflowConfigResolution::from_yaml(yaml)
+            let mut resolution =
+                WorkflowConfigResolution::from_yaml(yaml).unwrap_or_else(|error| panic!("{error}"));
+            defaults
+                .apply_to(&mut resolution)
                 .unwrap_or_else(|error| panic!("{error}"));
-            defaults.apply_to(&mut resolution).unwrap_or_else(|error| panic!("{error}"));
             resolution.config
         };
         for yaml in [ordinary, &advisor] {
             let config = resolve(yaml);
             crate::config::validate_config(&config).unwrap_or_else(|error| panic!("{error}"));
-            let compiled = crate::workflow::compile(config)
-                .unwrap_or_else(|error| panic!("{error}"));
-            let graph = crate::graph::build_graph(&compiled, 3)
-                .unwrap_or_else(|error| panic!("{error}"));
+            let compiled =
+                crate::workflow::compile(config).unwrap_or_else(|error| panic!("{error}"));
+            let graph =
+                crate::graph::build_graph(&compiled, 3).unwrap_or_else(|error| panic!("{error}"));
             let skips = crate::flags::preflight_skips(&compiled, &crate::flags::NO_FLAGS, &[]);
             crate::graph::validation::validate_workflow(&compiled, &graph, &graph.start, &skips)
                 .unwrap_or_else(|error| panic!("{error}"));
             if yaml == advisor {
                 let enabled = [("advisor".into(), true)].into_iter().collect();
                 let skips = crate::flags::preflight_skips(&compiled, &enabled, &["advise".into()]);
-                crate::graph::validation::validate_workflow(&compiled, &graph, &graph.start, &skips)
-                    .unwrap_or_else(|error| panic!("{error}"));
+                crate::graph::validation::validate_workflow(
+                    &compiled,
+                    &graph,
+                    &graph.start,
+                    &skips,
+                )
+                .unwrap_or_else(|error| panic!("{error}"));
                 let skips = crate::flags::preflight_skips(&compiled, &enabled, &[]);
-                let error = crate::graph::validation::validate_workflow(&compiled, &graph, &graph.start, &skips)
-                    .err().unwrap_or_else(|| panic!("enabled advisor accepted command backend"));
-                assert!(error.to_string().contains("step 'advise' uses advisor, which requires the jcode backend"), "{error}");
+                let error = crate::graph::validation::validate_workflow(
+                    &compiled,
+                    &graph,
+                    &graph.start,
+                    &skips,
+                )
+                .err()
+                .unwrap_or_else(|| panic!("enabled advisor accepted command backend"));
+                assert!(
+                    error
+                        .to_string()
+                        .contains("step 'advise' uses advisor, which requires the jcode backend"),
+                    "{error}"
+                );
             }
         }
         let explicit = format!("{schedule}\n{ordinary}");
         let error = crate::config::validate_config(&resolve(&explicit))
-            .expect_err("explicit advisor schedule accepted command backend");
-        assert!(error.to_string().contains("advisor_model") && error.to_string().contains("disabled_during"), "{error}");
+            .err()
+            .unwrap_or_else(|| panic!("explicit advisor schedule accepted command backend"));
+        assert!(
+            error.to_string().contains("advisor_model")
+                && error.to_string().contains("disabled_during"),
+            "{error}"
+        );
     }
 
     #[test]

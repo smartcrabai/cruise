@@ -204,18 +204,9 @@ fn check_resolved(
         max_retries,
         flags: config.flags.keys().cloned().collect(),
     };
-    let mut advisor_placements = std::collections::HashSet::new();
     result.diagnostics.extend(
         crate::config::validate_config_all(&config)
             .into_iter()
-            .filter(|error| match error {
-                CruiseError::InvalidStepConfig(message)
-                    if message.ends_with(crate::config::ADVISOR_PLACEMENT_SUFFIX) =>
-                {
-                    advisor_placements.insert(message.clone())
-                }
-                _ => true,
-            })
             .map(|e| Diagnostic::error("validate", e)),
     );
     if let Err(e) = crate::config::validate_group_retry_budget(&config, max_retries) {
@@ -587,23 +578,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn advisor_placement_diagnostics_are_coalesced() {
+    fn invalid_advisor_placement_reports_one_diagnostic() {
         for (step, yaml) in [
-            ("fan", "  fan: {parallel: {a: {prompt: inspect}}, advisor: true}\n"),
-            ("fan/a", "  fan: {parallel: {a: {prompt: inspect, advisor: true}}}\n"),
-            ("call", "  call: {group: g, advisor: true}\ngroups:\n  g:\n    steps:\n      a: {prompt: inspect}\n"),
-            ("merge", "after-pr:\n  merge: {squash-merge: true, flag: merge, advisor: true}\nflags:\n  merge: {}\n"),
+            (
+                "fan",
+                "  fan: {parallel: {a: {prompt: inspect}}, advisor: true}\n",
+            ),
+            (
+                "fan/a",
+                "  fan: {parallel: {a: {prompt: inspect, advisor: true}}}\n",
+            ),
+            (
+                "call",
+                "  call: {group: g, advisor: true}\ngroups:\n  g:\n    steps:\n      a: {prompt: inspect}\n",
+            ),
+            (
+                "merge",
+                "after-pr:\n  merge: {squash-merge: true, flag: merge, advisor: true}\nflags:\n  merge: {}\n",
+            ),
         ] {
             let config = WorkflowConfig::from_yaml(&format!(
                 "steps:\n  main: {{prompt: implement, timeout: invalid}}\n{yaml}"
             ))
             .unwrap_or_else(|error| panic!("{error}"));
             let result = check_resolved(config, &crate::flags::NO_FLAGS, None);
-            let messages: Vec<_> = result.diagnostics.iter().map(|d| d.message.as_str()).collect();
-            let advisor: Vec<_> = messages.iter().filter(|message| message.contains("advisor")).collect();
+            let messages: Vec<_> = result
+                .diagnostics
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect();
+            let advisor: Vec<_> = messages
+                .iter()
+                .filter(|message| message.contains("advisor"))
+                .collect();
             assert_eq!(advisor.len(), 1, "{messages:?}");
-            assert!(advisor[0].contains(&format!("step '{step}'")), "{messages:?}");
-            assert!(messages.iter().any(|message| message.contains("step 'main' has invalid timeout")), "{messages:?}");
+            assert!(
+                advisor[0].contains(&format!("step '{step}'")),
+                "{messages:?}"
+            );
+            assert!(
+                messages
+                    .iter()
+                    .any(|message| message.contains("step 'main' has invalid timeout")),
+                "{messages:?}"
+            );
         }
     }
 

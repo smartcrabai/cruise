@@ -61,7 +61,7 @@ fn tdd_materializes_one_opt_in_advisor_pass() {
     )
     .unwrap();
     let enabled = FlagValues::from([("advisor".into(), true)]);
-    flags::validate_names(&config, &enabled).expect("tdd must declare the advisor flag");
+    flags::validate_names(&config, &enabled).unwrap();
     validate_config(&config).unwrap();
     let compiled = compile(config).unwrap();
     let ids: Vec<_> = compiled.steps.keys().map(String::as_str).collect();

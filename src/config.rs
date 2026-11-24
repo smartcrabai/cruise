@@ -1550,13 +1550,6 @@ pub(crate) fn validate_quality_gates(config: &WorkflowConfig) -> crate::error::R
     Ok(())
 }
 
-pub(crate) const ADVISOR_PLACEMENT_SUFFIX: &str =
-    " advisor is only supported on ordinary prompts under top-level steps";
-
-fn advisor_placement_error(name: &str) -> crate::error::CruiseError {
-    crate::error::CruiseError::InvalidStepConfig(format!("step '{name}'{ADVISOR_PLACEMENT_SUFFIX}"))
-}
-
 /// Advisors must be ordinary top-level prompt steps, before group expansion.
 pub(crate) fn validate_advisor(config: &WorkflowConfig) -> crate::error::Result<()> {
     fn check(name: &str, step: &StepConfig, top_level: bool) -> crate::error::Result<()> {
@@ -1575,7 +1568,9 @@ pub(crate) fn validate_advisor(config: &WorkflowConfig) -> crate::error::Result<
                 || step.squash_merge.is_some()
                 || step.github_review.is_some()
             {
-                return Err(advisor_placement_error(name));
+                return Err(invalid(
+                    "is only supported on ordinary prompts under top-level steps",
+                ));
             }
             if step
                 .output_file
@@ -1984,9 +1979,6 @@ pub(crate) fn validate_squash_merge_step(
     let invalid = |detail: &str| {
         CruiseError::InvalidStepConfig(format!("step '{name}' squash-merge: {detail}"))
     };
-    if step.advisor {
-        return Err(advisor_placement_error(name));
-    }
     if step.squash_merge != Some(true) {
         return Err(invalid("must be set to true"));
     }
@@ -2058,12 +2050,6 @@ pub(crate) fn validate_parallel_step(name: &str, step: &StepConfig) -> crate::er
     let Some(children) = &step.parallel else {
         return Ok(());
     };
-    if step.advisor {
-        return Err(advisor_placement_error(name));
-    }
-    if let Some((child, _)) = children.iter().find(|(_, child)| child.advisor) {
-        return Err(advisor_placement_error(&format!("{name}/{child}")));
-    }
     if step.quality_gates.is_some() || children.values().any(|child| child.quality_gates.is_some())
     {
         return Err(CruiseError::InvalidStepConfig(format!(
@@ -2404,17 +2390,23 @@ pub(crate) fn execution_model_candidates(
         &resolve_candidates(config.model.as_ref(), sdk),
         sdk,
     );
-    for step in config.steps.iter().filter_map(|(name, step)| {
-        (!(step.advisor
-            && (crate::flags::is_disabled(step.flag.as_ref(), flags)
-                || skipped_steps.iter().any(|skip| skip == name))))
-        .then_some(step)
-    }).chain(config.after_pr.values()).chain(
-        config
-            .groups
-            .values()
-            .flat_map(|group| group.steps.values()),
-    ) {
+    for step in config
+        .steps
+        .iter()
+        .filter_map(|(name, step)| {
+            (!(step.advisor
+                && (crate::flags::is_disabled(step.flag.as_ref(), flags)
+                    || skipped_steps.iter().any(|skip| skip == name))))
+            .then_some(step)
+        })
+        .chain(config.after_pr.values())
+        .chain(
+            config
+                .groups
+                .values()
+                .flat_map(|group| group.steps.values()),
+        )
+    {
         collect_step(config, step, sdk, &mut candidates);
     }
     candidates
@@ -2749,9 +2741,6 @@ fn validate_step_groups(
 
     for (step_name, step) in steps {
         if let Some(group_name) = step.group.as_deref() {
-            if step.advisor {
-                return Err(advisor_placement_error(step_name));
-            }
             if !groups.contains_key(group_name) {
                 return Err(CruiseError::InvalidStepConfig(format!(
                     "step '{step_name}' references undefined group '{group_name}'"
@@ -3055,7 +3044,8 @@ mod tests {
         let error = WorkflowConfig::from_yaml(
             "steps:\n  inspect:\n    prompt: inspect\n    advisor: true\n    advisor_typo: true\n    output_file: advice.md\n",
         )
-        .expect_err("unknown step property must still fail");
+        .err()
+        .unwrap_or_else(|| panic!("unknown step property must still fail"));
         assert!(error.to_string().contains("advisor_typo"), "{error}");
     }
 

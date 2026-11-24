@@ -8490,17 +8490,23 @@ esac
 
     #[test]
     fn execution_auth_only_checks_enabled_unskipped_advisors() -> Result<()> {
+        use crate::test_support::EnvGuard;
+        fn flag_values(enabled: bool) -> crate::flags::FlagValues {
+            [("advisor".into(), enabled)].into_iter().collect()
+        }
         let _lock = crate::test_support::lock_process();
         let temp = tempfile::tempdir()?;
         let _home = isolate_application_config(temp.path());
-        use crate::test_support::EnvGuard;
         let auth_home = temp.path().join("jcode");
         let _auth_home = EnvGuard::set("JCODE_HOME", &auth_home);
         let _skip = EnvGuard::remove("CRUISE_SKIP_AGENT_AUTH_CHECK");
         let _anthropic_key = EnvGuard::remove("ANTHROPIC_API_KEY");
         let _openai_key = EnvGuard::set("OPENAI_API_KEY", "test-normal-provider-key");
         std::fs::create_dir(&auth_home)?;
-        std::fs::write(auth_home.join("auth.json"), r#"{"anthropic_accounts":[{"access":"expired","expires":1}]}"#)?;
+        std::fs::write(
+            auth_home.join("auth.json"),
+            r#"{"anthropic_accounts":[{"access":"expired","expires":1}]}"#,
+        )?;
         let repo = temp.path().join("repo");
         std::fs::create_dir(&repo)?;
         crate::test_support::init_git_repo(&repo);
@@ -8508,14 +8514,19 @@ esac
         let app = CruiseApplication::new(manager.clone());
         let id = SessionManager::new_session_id();
         let mut state = SessionState::new(
-            id.clone(), repo, crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None }, "auth test".into(),
+            id.clone(),
+            repo,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
+            "auth test".into(),
         );
         state.phase = SessionPhase::Planned;
         state.workspace_mode = WorkspaceMode::CurrentBranch;
         manager.create(&state)?;
         let session = manager.sessions_dir().join(&id);
         std::fs::write(session.join("plan.md"), "# Auth test\n")?;
-        std::fs::write(session.join("config.yaml"), r"
+        std::fs::write(
+            session.join("config.yaml"),
+            r"
 sdk: jcode
 model: openai/normal
 advisor_model: claude/advice
@@ -8529,8 +8540,11 @@ steps:
     flag: advisor
     prompt: Inspect
     output_file: advice.md
-")?;
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+",
+        )?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
         for (stored, requested, skip, rejected) in [
             (false, None, false, false),
             (true, None, true, false),
@@ -8538,19 +8552,34 @@ steps:
             (true, Some(false), false, false),
             (false, Some(true), false, true),
         ] {
-            let flag_values = |enabled| [("advisor".into(), enabled)].into_iter().collect();
             state.flags = flag_values(stored);
-            state.skipped_steps = if skip { vec!["inspect".into()] } else { Vec::new() };
+            state.skipped_steps = if skip {
+                vec!["inspect".into()]
+            } else {
+                Vec::new()
+            };
             manager.save(&state)?;
-            let request = RunRequest { flags: requested.map(flag_values), ..RunRequest::default() };
+            let request = RunRequest {
+                flags: requested.map(flag_values),
+                ..RunRequest::default()
+            };
             let early = app.preflight_run_auth(&id, &request);
             let setup = setup_run_blocking(
-                &manager, runtime.handle(), &id, &CancellationToken::new(),
-                RunSetupOptions { flags_override: request.flags, ..RunSetupOptions::default() },
-            ).map(|_| ());
+                &manager,
+                runtime.handle(),
+                &id,
+                &CancellationToken::new(),
+                RunSetupOptions {
+                    flags_override: request.flags,
+                    ..RunSetupOptions::default()
+                },
+            )
+            .map(|_| ());
             for result in [early, setup] {
                 if rejected {
-                    let error = result.err().unwrap_or_else(|| panic!("expired advisor auth was accepted"));
+                    let error = result
+                        .err()
+                        .unwrap_or_else(|| panic!("expired advisor auth was accepted"));
                     assert_eq!(error.telemetry_type(), "agent_auth_expired", "{error}");
                 } else {
                     result?;

@@ -144,7 +144,12 @@ async fn advisor_receives_host_diff_and_replaces_stale_advice() -> Result<()> {
     assert!(stat.lines().any(|line| line == " - | untracked"), "{stat}");
     assert!(patch.contains("+tracked edit"), "{patch}");
     assert!(patch.contains("+untracked edit"), "{patch}");
-    assert!(patch.lines().any(|line| line == "+literal dash file content"), "{patch}");
+    assert!(
+        patch
+            .lines()
+            .any(|line| line == "+literal dash file content"),
+        "{patch}"
+    );
     assert!(!diff.contains("ignored.txt"), "{diff}");
     assert!(!diff.contains("excluded worktree content"), "{diff}");
     let advice = crate::artifacts::read(&f.artifacts, ADVICE)?;
@@ -162,9 +167,15 @@ async fn advisor_invalidates_before_resolving_step_environment() -> Result<()> {
     let f = Fixture::new(true)?;
     let dispatched = f.root.path().join("dispatched");
     let backend = format!("touch '{}'", dispatched.display());
-    let steps = ROUTED_STEPS.replace("    if:", "    env:\n      CHECK: '{undefined_advisor_env}'\n    if:");
+    let steps = ROUTED_STEPS.replace(
+        "    if:",
+        "    env:\n      CHECK: '{undefined_advisor_env}'\n    if:",
+    );
     let (result, _) = f.run(&backend, &steps, &NO_FLAGS, &[], None).await;
-    assert!(matches!(result, Err(CruiseError::UndefinedVariable(_))), "{result:?}");
+    assert!(
+        matches!(result, Err(CruiseError::UndefinedVariable(_))),
+        "{result:?}"
+    );
     assert!(!dispatched.exists());
     f.assert_no_advice();
     Ok(())
@@ -174,19 +185,44 @@ async fn advisor_invalidates_before_resolving_step_environment() -> Result<()> {
 async fn advisor_publishes_only_after_visit_acceptance() -> Result<()> {
     let _lock = lock_process();
     for (condition, routed, error) in [
-        ("    if:\n      no-file-changes: failed\n", false, "step_no_file_changes"),
-        ("    quality_gates:\n      - command: 'exit 9'\n        stop_exit_codes: [9]\n", false, "quality_gate_stopped"),
-        ("    quality_gates:\n      - command: 'exit 9'\n    if:\n      fail: fallback\n", true, ""),
+        (
+            "    if:\n      no-file-changes: failed\n",
+            false,
+            "step_no_file_changes",
+        ),
+        (
+            "    quality_gates:\n      - command: 'exit 9'\n        stop_exit_codes: [9]\n",
+            false,
+            "quality_gate_stopped",
+        ),
+        (
+            "    quality_gates:\n      - command: 'exit 9'\n    if:\n      fail: fallback\n",
+            true,
+            "",
+        ),
     ] {
         let f = Fixture::new(true)?;
-        let steps = format!("  advise:\n    prompt: review\n    advisor: true\n    output_file: {ADVICE}\n{condition}  fallback:\n    prompt: '{{file:{ADVICE}}}'\n");
+        let steps = format!(
+            "  advise:\n    prompt: review\n    advisor: true\n    output_file: {ADVICE}\n{condition}  fallback:\n    prompt: '{{file:{ADVICE}}}'\n"
+        );
         // Check absence on every dispatch, including retries, and emit a marker that advisors ignore.
-        let backend = format!("test ! -e '{}' || exit 99; echo 'NO_CHANGES_INTENTIONAL: read-only'", f.artifacts.join(ADVICE).display());
+        let backend = format!(
+            "test ! -e '{}' || exit 99; echo 'NO_CHANGES_INTENTIONAL: read-only'",
+            f.artifacts.join(ADVICE).display()
+        );
         let (result, started) = f.run(&backend, &steps, &NO_FLAGS, &[], None).await;
-        let Err(result) = result else { panic!("advisor rejection unexpectedly succeeded"); };
+        let Err(result) = result else {
+            panic!("advisor rejection unexpectedly succeeded");
+        };
         if routed {
-            assert!(result.to_string().contains("failed to read artifact"), "{result}");
-            assert_eq!(started, ["advise", "advise", "advise", "advise", "fallback"]);
+            assert!(
+                result.to_string().contains("failed to read artifact"),
+                "{result}"
+            );
+            assert_eq!(
+                started,
+                ["advise", "advise", "advise", "advise", "fallback"]
+            );
         } else {
             assert_eq!(result.telemetry_type(), error, "{result}");
             assert_eq!(started, ["advise"]);
@@ -216,7 +252,10 @@ async fn accepted_advisor_preserves_prev_and_publishes_before_successor() -> Res
     assert_eq!(result?.failed, 0);
     assert_eq!(started, ["ordinary", "advise", "apply"]);
     let consumed = crate::artifacts::read(&f.artifacts, "consumed")?;
-    assert!(consumed.contains("previous=prior") && consumed.contains("advice=fresh"), "{consumed}");
+    assert!(
+        consumed.contains("previous=prior") && consumed.contains("advice=fresh"),
+        "{consumed}"
+    );
     Ok(())
 }
 
@@ -225,12 +264,19 @@ async fn advisor_diff_includes_the_201st_eligible_untracked_file() -> Result<()>
     let _lock = lock_process();
     let f = Fixture::new(true)?;
     for index in 0..201 {
-        fs::write(f.repo.join(format!("advisor-untracked-{index:03}.txt")), "tiny\n")?;
+        fs::write(
+            f.repo.join(format!("advisor-untracked-{index:03}.txt")),
+            "tiny\n",
+        )?;
     }
-    let (result, _) = f.run("echo fresh", ROUTED_STEPS, &NO_FLAGS, &[], None).await;
+    let (result, _) = f
+        .run("echo fresh", ROUTED_STEPS, &NO_FLAGS, &[], None)
+        .await;
     assert_eq!(result?.failed, 0);
     let diff = crate::artifacts::read(&f.artifacts, DIFF)?;
-    let (stat, patch) = diff.split_once("diff --git").unwrap_or_else(|| panic!("no patch"));
+    let (stat, patch) = diff
+        .split_once("diff --git")
+        .unwrap_or_else(|| panic!("no patch"));
     assert!(stat.contains("advisor-untracked-200.txt"));
     assert!(patch.contains("+++ b/advisor-untracked-200.txt"));
     assert!(!diff.contains("[Diff truncated]"));

@@ -56,9 +56,9 @@ jcode の subagent model は有効な空でない model に解決される必要
 <a id="advisor-steps"></a>
 ### アドバイザーステップ
 
-`advisor: true` は `steps` 直下の通常の prompt step（`workflow_call` でそこに展開されたステップを含む）に指定できます。`output_file` が必須で、`allow_commit: true` は指定できません。ワークフローの既定値に関係なく[読み取り専用](#permission-modes)になります。ステップの `permission` は省略するか `read-only` にしてください。
+`advisor: true` は `steps` 直下の通常の prompt step（`workflow_call` でそこに展開されたステップを含む）に指定できます。`output_file` が必須で、`allow_commit: true` は指定できません。ワークフローの既定値に関係なく[読み取り専用](#permission-modes)になります。ステップの `permission` は省略するか `read-only` にしてください。アドバイザーの実行にはワークフローの [`mcp_servers`](#mcp-servers-mcp_servers) は渡されません。
 
-モデルはステップの `model` → `advisor_model` → `plan_model` → ワークフローの `model` の順で選択します。空のロール配列は未設定として扱います。`advisor_model` は `plan_model` と同様、モデル文字列または `disabled_during` を含められるフォールバック配列を指定できます。ワークフローやユーザー／プロジェクトの `default.yaml` に設定し、`CRUISE_ADVISOR_MODEL`（文字列または JSON 配列）で上書きできます。`cruise config` の設定項目ではなく、他の prompt には影響しません。
+モデルはステップの `model` → `advisor_model` → `plan_model` → ワークフローの `model` の順で選択します。空のロール配列は未設定として扱います。`advisor_model` は `plan_model` と同様、モデル文字列または `disabled_during` を含められるフォールバック配列を指定できます。ワークフローやユーザー／プロジェクトの `default.yaml` に設定し、`CRUISE_ADVISOR_MODEL`（文字列または JSON 配列）で上書きできます。`command:` ワークフローは `default.yaml` から継承した `advisor_model` を無視します。`cruise config` の設定項目ではなく、他の prompt には影響しません。
 
 有効なアドバイザーには jcode が必要です。実行前の検証（dry run を含む）では、フラグで無効化されたアドバイザーと、ユーザーが明示的にスキップしたアドバイザーをこの確認から除外します。`cruise workflow doctor` が適用するのはフラグによるスキップのみです。アドバイザーは `cruise tell` で保留中の指示を消費しません。
 
