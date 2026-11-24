@@ -363,7 +363,7 @@ groups:
           - protects: <construct> at <file:line>
           ```
 
-          `protects:` is optional, only for an applied, non-reverted `REV`/`PLAN`/`WIRE` change that added/restored code; name its current construct and location. Carry each still-relevant fresh-ledger `protects:` line forward with updated location; drop only if code is gone for a reason other than `SIMP` removal. Consolidate/simplify must treat protected code as off-limits to `SIMP` removal/narrowing.
+          `protects:` is optional, only for an applied, non-reverted `REV`/`PLAN`/`WIRE` change that added/restored code; name its current construct and location, one `- protects:` line per construct. Carry each still-relevant fresh-ledger `protects:` line forward with updated location; drop only if code is gone for a reason other than `SIMP` removal. Consolidate/simplify must treat protected code as off-limits to `SIMP` removal/narrowing.
 
           Stale/absent ledger starts at iteration `1`; fresh ledger increments. Record every ID represented in consolidated output, including `Dropped`, and every still-relevant prior record. Preserve prior states absent evidence for transition; unavailable sources alone do not resolve prior findings. Never renumber.
 
@@ -398,7 +398,7 @@ groups:
           - `<ID>`: `<new|persists|resolved|wont-fix>` - `<evidence>`
 
           ## Ledger Records
-          Emit this as the final section of the complete output: exactly one `text` fenced code block immediately after the heading, with no surrounding commentary and no output after its closing fence. It contains the full ledger body: `iteration: <integer>`, a blank line, then every applicable `### <ID> | <state> | <severity> | <file:line>` record with its summary/evidence/optional protects lines. Do not include `head:` or `snapshot:`; the trusted host quality gate supplies those fields.
+          Emit this as the final section of the complete output: exactly one `text` fenced code block immediately after the heading, with no surrounding commentary and no output after its closing fence. It contains the full ledger body: `iteration: <integer>`, a blank line, then every applicable `### <ID> | <state> | <severity> | <file:line>` record with its summary/evidence/optional protects lines, separated by one blank line. Do not include `head:` or `snapshot:`; the trusted host quality gate supplies those fields.
 
           Never ask the user; this step runs unattended.
         output_file: analysis/apply-output.md
