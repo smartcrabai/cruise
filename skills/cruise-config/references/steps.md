@@ -260,7 +260,7 @@ steps:
 | `prompt` | string | Inline prompt body (use with prompt steps) |
 | `prompt_file` | string \| null | File or supported GitHub blob/raw URL whose contents become the prompt; absolute, `~/`, or config-file-relative path (`~`/null means the local home directory) |
 | `output_file` | string \| null | Relative session artifact file receiving the final output of a prompt step |
-| `quality_gates` | non-empty array | Prompt-only ordered command checks, each with required nonblank `command` and optional `timeout`; see [flow-control.md](flow-control.md#quality_gates--prompt-step-verification) |
+| `quality_gates` | non-empty array | Prompt-only ordered command checks, each with required nonblank `command`, optional `timeout`, and optional nonzero `stop_exit_codes` that stop without retry; see [flow-control.md](flow-control.md#quality_gates--prompt-step-verification) |
 | `instruction` | string | Message shown to the user before the step; input prompt when `{input}` is empty (prompt steps) |
 | `plan` | string | Path of a file displayed before an option step menu |
 | `option` | array | Choices for option steps |

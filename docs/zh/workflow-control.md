@@ -204,6 +204,8 @@ steps:
 
 重试遵循现有的逐边预算（`--max-retries`、否则为顶层 `max_retries`、再否则为 3），并与该步骤上的其他自重试共享预算。预算耗尽时，`if.fail: <step>` 会跳转到该步骤；否则，cruise 会报出 `QualityGateExhausted` 并停止运行。
 
+对于重试提示也无法修复的失败（例如缺少前提条件），可以在门禁上设置 `stop_exit_codes`（至少包含一个非零退出码的列表）。门禁以列出的退出码结束时，cruise 不记录反馈，忽略重试预算和 `if.fail`，以 `QualityGateStopped` 停止运行，并将清理后的门禁输出作为失败原因。恢复 session 时会重新运行同一个提示步骤。内置的 E2E guard 使用 `stop_exit_codes: [75]`。
+
 允许在提示步骤和 `prompt_file` 步骤上使用门禁，包括组内的各个步骤。并行父步骤和子步骤、`after-pr` 步骤、组或 `workflow_call` 调用处，以及非提示步骤均不接受门禁。门禁命令与普通 `command` 步骤一样，会执行 shell 命令；请仅使用可信的工作流配置。
 
 <a id="step-groups"></a>

@@ -60,3 +60,8 @@ Feature: Authoritative checkpoint workflow contracts
   Scenario: Exhaustion without a failure transition returns a quality gate error
     When I compile a quality gate error workflow
     Then exhaustion stops with a quality gate error
+
+  @quality_gate @stop
+  Scenario: A stop exit code fails without retry or failure transition and resume reruns the prompt
+    When I compile a quality gate stop workflow
+    Then a stop status fails without retry and resume reruns the prompt

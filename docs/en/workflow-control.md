@@ -209,6 +209,8 @@ A failed gate retries the same prompt step before applying its normal transition
 
 Retries use the existing per-edge budget (`--max-retries`, then top-level `max_retries`, then 3), shared with other self-retries on that step. On exhaustion, `if.fail: <step>` jumps to that step; otherwise cruise stops with `QualityGateExhausted`.
 
+Set `stop_exit_codes` (a nonempty list of nonzero codes) on a gate whose failure retrying the prompt cannot fix, such as missing prerequisites. When the gate exits with a listed code, cruise records no feedback, ignores the retry budget and `if.fail`, and stops with `QualityGateStopped`; the sanitized gate output is the failure reason. Resuming the session reruns the same prompt step. The built-in E2E guard uses `stop_exit_codes: [75]`.
+
 Gates are allowed on prompt and `prompt_file` steps, including individual steps inside a group. They are rejected on parallel parents and children, `after-pr` steps, group or `workflow_call` call sites, and non-prompt steps. Gate commands execute shell commands, just like ordinary `command` steps; only use trusted workflow configurations.
 
 <a id="step-groups"></a>

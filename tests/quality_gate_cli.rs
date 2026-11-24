@@ -194,6 +194,39 @@ fn exhausted_gate_uses_fail_goto() -> TestResult {
 }
 
 #[test]
+fn stop_exit_code_fails_once_with_gate_output_and_skips_fail_goto() -> TestResult {
+    let f = Fixture::new(
+        "echo 'missing prerequisite: simulator'; exit 75\n",
+        2,
+        "        stop_exit_codes: [75]\n    if:\n      fail: recover\n  recover:\n    command: 'touch recovered'\n",
+    )?;
+    let out = f.exec()?;
+    assert!(!out.status.success(), "{}", text(&out));
+    assert_eq!(f.attempts(), 1, "{}", text(&out));
+    assert!(!f.repo.join("recovered").exists());
+    let message = text(&out);
+    assert!(
+        message.contains("quality gate stopped step 'implement'")
+            && message.contains("missing prerequisite: simulator"),
+        "{message}"
+    );
+    Ok(())
+}
+
+#[test]
+fn unlisted_exit_code_still_retries_with_stop_codes_configured() -> TestResult {
+    let f = Fixture::new(
+        "if [ ! -f \"$HOME/gate-ran\" ]; then touch \"$HOME/gate-ran\"; exit 1; fi\n",
+        2,
+        "        stop_exit_codes: [75]\n",
+    )?;
+    let out = f.exec()?;
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(f.attempts(), 2);
+    Ok(())
+}
+
+#[test]
 fn feedback_masks_secrets() -> TestResult {
     let f = Fixture::new(
         "if [ ! -f \"$HOME/gate-ran\" ]; then touch \"$HOME/gate-ran\"; echo 'password=hunter2'; echo 'Authorization: Bearer abc.def'; exit 1; fi\n",

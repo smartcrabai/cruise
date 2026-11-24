@@ -13,9 +13,31 @@ pub(crate) struct ResolvedGate {
 
 pub(crate) struct QualityGateFailure {
     pub command: String,
+    /// Exit status of a gate that ran to completion without a signal.
+    pub exit_code: Option<i32>,
     result: String,
     /// Sanitized and bounded by the gate reader or error sanitizer.
     output: String,
+}
+
+impl QualityGateFailure {
+    /// Whether `stop_exit_codes` lists this failure's exit status.
+    pub(crate) fn stops(&self, stop_exit_codes: Option<&[u8]>) -> bool {
+        self.exit_code
+            .and_then(|code| u8::try_from(code).ok())
+            .is_some_and(|code| stop_exit_codes.is_some_and(|codes| codes.contains(&code)))
+    }
+
+    /// Sanitized, bounded gate output used as the stop reason.
+    pub(crate) fn stop_reason(&self) -> String {
+        let excerpt = crate::telemetry::stderr::excerpt_sanitized(&self.output);
+        let excerpt = excerpt.trim();
+        if excerpt.is_empty() {
+            self.result.clone()
+        } else {
+            excerpt.to_string()
+        }
+    }
 }
 
 pub(crate) async fn run_quality_gates(
@@ -40,6 +62,7 @@ pub(crate) async fn run_quality_gates(
                 let message = crate::telemetry::stderr::sanitize(&error.to_string()).body;
                 return Ok(Some(QualityGateFailure {
                     command: gate.command.clone(),
+                    exit_code: None,
                     result: message.clone(),
                     output: message,
                 }));
@@ -67,6 +90,10 @@ pub(crate) async fn run_quality_gates(
                 };
                 return Ok(Some(QualityGateFailure {
                     command: gate.command.clone(),
+                    exit_code: status
+                        .as_ref()
+                        .filter(|status| status.signal.is_none())
+                        .and_then(|status| status.exit_code),
                     result,
                     output: text,
                 }));

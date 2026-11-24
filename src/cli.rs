@@ -433,6 +433,19 @@ pub enum InternalCommand {
     },
     SyncReviewHead,
     TddLedgerSnapshot,
+    /// Record the working tree before a flagged UI E2E step.
+    E2eBaseline {
+        /// Step whose baseline is recorded.
+        step: String,
+    },
+    /// Reject tooling changes since the baseline and stop on a blocked report.
+    E2eGuard {
+        /// Step whose baseline is compared.
+        step: String,
+        /// Session artifact holding the step report with its `E2E_STATUS:` line.
+        #[arg(long)]
+        report: Option<String>,
+    },
     FinishConflictCommit,
     PushAfterSync,
     ClearCiFollowup,

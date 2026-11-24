@@ -7,7 +7,13 @@ This policy applies only to applicable browser-facing, mobile, and desktop UI fl
 - Inventory each real in-scope UI target and classify its actual framework from manifests, source, and app entry points before choosing tools. React Native/Expo remains React Native/Expo when generated `ios/` files exist; Electron means its real desktop application, not an ordinary browser renderer; Tauri means its native WebView plus Rust/IPC application. Inspect existing tests, CI, and repository instructions. Preserve suitable established tooling, versions, commands, setup, and CI; do not add unrelated suites.
 - This is UI E2E policy only. Keep ordinary CLI, HTTP API, Testcontainers real-service, Pact consumer/provider contract, and other default test-stack coverage in ordinary workflows; do not move it behind a UI-E2E flag.
 - Use available relevant skills and connected tools when useful, but they are optional. Do not guess tool or API names, require a skill/MCP loader, create skills, edit global MCP/config, or block solely because optional skills or MCP are unavailable. Follow repository instructions and never let optional guidance override repository or user requirements.
-- Reuse suitable existing tools independently for each capability. Consider a framework recommendation only when its corresponding capability is genuinely missing. Verify compatibility for the actual app, host, runtime, and client; pin compatible versions and revisions when introducing a tool. Do not silently switch runners when a selected setup is unsupported.
+- Reuse suitable existing tools independently for each capability. Outside the `e2e` workflow flag, consider a framework recommendation only when its corresponding capability is genuinely missing. Verify compatibility for the actual app, host, runtime, and client; pin compatible versions and revisions when introducing a tool. Do not silently switch runners when a selected setup is unsupported.
+
+## Tooling boundary under the `e2e` workflow flag
+
+Built-in `e2e` flag steps (TDD `e2e`; refactor `prepare-e2e` and `e2e-final-check`) use only tooling the repository and environment already provide. They do not install, download, add, upgrade, or downgrade dependencies, toolchains, or test tools; edit dependency manifests, lockfiles, toolchain pins, or CI configuration; or introduce an E2E framework the repository does not already use. They never substitute another target, platform build, or runner (for example, a web export for a native app) for one that cannot run. Framework recommendations in these policies are the preparation such a step reports for a missing capability, not tools it adds. A host guard compares the working tree with a baseline recorded before each step and makes the step undo such changes.
+
+Each run report lists every blocked capability under `## Blockers` with what is missing, the command and result proving it, and the exact preparation needed, then ends with exactly one `E2E_STATUS: passed`, `E2E_STATUS: blocked`, or `E2E_STATUS: not-applicable` line. `blocked` stops the session before later steps, with the blockers as its failure reason. Prepare the prerequisites and resume, or resume with `-f e2e=off` to continue without UI E2E. Workflows whose approved plan adds UI E2E tooling, such as `add-tests`, may still introduce framework recommendations.
 
 ## Two separate capabilities
 
@@ -23,9 +29,9 @@ Run prepared E2E suites and checks needed to diagnose failures. Fix genuine appl
 
 ## Report
 
-For each target, record its framework and actual app/runtime; visual tool and version, saved screenshot paths, and evidence that screenshot pixels were inspected; persistent E2E source and substantive assertions; reset/isolation; exact setup, build, and test commands and results; and CI changes. Keep UI E2E results separate from ordinary CLI/API/default test coverage. State genuine failures and fixes, missing capabilities and exact blockers, work completed, and unverified scope.
+For each target, record its framework and actual app/runtime; visual tool and version, saved screenshot paths, and evidence that screenshot pixels were inspected; persistent E2E source and substantive assertions; reset/isolation; exact setup, build, and test commands and results; and CI changes or, under the `e2e` flag, CI wiring the suite still needs. Keep UI E2E results separate from ordinary CLI/API/default test coverage. State genuine failures and fixes, missing capabilities and exact blockers, work completed, and unverified scope.
 
-Wire a prepared suite into the existing provider-native CI only when it is reproducible on a supported runner and available without secrets. Make failures fail CI. Preserve applicable browser/Electron checks on supported hosts and Linux web CI; do not disable them to avoid an unsupported native target.
+Outside the `e2e` flag, wire a prepared suite into the existing provider-native CI only when it is reproducible on a supported runner and available without secrets. Make failures fail CI. Preserve applicable browser/Electron checks on supported hosts and Linux web CI; do not disable them to avoid an unsupported native target.
 
 ## No-new-tool policy: targets without a listed framework recommendation
 

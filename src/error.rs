@@ -92,6 +92,13 @@ pub enum CruiseError {
         attempts: usize,
     },
 
+    #[error("quality gate stopped step '{step}' ({command}): {reason}")]
+    QualityGateStopped {
+        step: String,
+        command: String,
+        reason: String,
+    },
+
     #[error(
         "required command failed for step '{step}' (command: {command}; exit code: {exit_code:?}; signal: {signal:?}; accepted exit codes: {accepted_exit_codes:?}): {detail}"
     )]
@@ -159,6 +166,7 @@ impl CruiseError {
             Self::SessionStateConflictAborted(_) => "session_state_conflict_aborted",
             Self::StepMadeNoFileChanges(_) => "step_no_file_changes",
             Self::QualityGateExhausted { .. } => "quality_gate_exhausted",
+            Self::QualityGateStopped { .. } => "quality_gate_stopped",
             Self::RequiredCommandFailed { .. } => "required_command_failed",
             Self::StepTimeout { .. } => "timeout",
             Self::GitHubReviewFailed { .. } => "github_review_failed",

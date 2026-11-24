@@ -373,10 +373,16 @@
             "additionalProperties": false,
             "properties": {
               "command": { "type": "string" },
-              "timeout": { "type": "string" }
+              "timeout": { "type": "string" },
+              "stop_exit_codes": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "integer", "minimum": 1, "maximum": 255 },
+                "description": "Exit codes that stop the step without retrying its prompt; the session fails with the gate output as its reason."
+              }
             }
           },
-          "description": "Ordered shell checks run after a successful prompt. Failure retries the prompt."
+          "description": "Ordered shell checks run after a successful prompt. Failure retries the prompt unless the exit code is listed in stop_exit_codes."
         },
         "output_file": {
           "type": ["string", "null"],

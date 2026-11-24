@@ -9,19 +9,23 @@ module quality_gate {
   pure val initial: State = { phase: 0, count: 0, limit: 2, feedback: false, effects: 0 }
   action init = all { s' = initial, previous' = initial, event' = "init" }
   action record(n: State, e: str): bool = all { previous' = s, s' = n, event' = e }
-  // phase 0 prompt, 1 pending gate failure, 2 success, 3 exhausted.
+  // phase 0 prompt, 1 pending gate failure, 2 success, 3 exhausted, 4 exhausted goto,
+  // 5 stopped by a listed stop exit code. A stop ends this run; a later session
+  // resume reruns the prompt as a fresh run outside this model.
   action pass = all { s.phase == 0, record({ ...s, phase: 2, feedback: false, effects: s.effects + 1 }, "pass") }
   action gateFail = all { s.phase == 0, record({ ...s, phase: 1, feedback: true, effects: s.effects + 1 }, "fail") }
+  action gateStop = all { s.phase == 0, record({ ...s, phase: 5, feedback: false, effects: s.effects + 1 }, "stop") }
   action retry = all { s.phase == 1, s.count < s.limit, record({ ...s, phase: 0, count: s.count + 1 }, "retry") }
   action exhaust = all { s.phase == 1, s.count >= s.limit, record({ ...s, phase: 3, feedback: false }, "exhaust") }
   action exhaustedGoto = all { s.phase == 1, s.count >= s.limit, record({ ...s, phase: 4, feedback: false }, "exhaustGoto") }
   action resume = record(s, "resume")
   action idle = record(s, "idle")
-  action step = any { pass, gateFail, retry, exhaust, exhaustedGoto, resume, idle }
+  action step = any { pass, gateFail, gateStop, retry, exhaust, exhaustedGoto, resume, idle }
   // Supplementary failure and success behavior.
   val gate_behavior = all {
     event == "fail" implies s.phase == 1 and s.feedback,
     event == "pass" implies s.phase == 2 and not(s.feedback),
+    event == "stop" implies s.phase == 5 and not(s.feedback) and previous.phase == 0,
     s.phase == 1 implies s.feedback,
   }
   // Supplementary retry-budget behavior.
@@ -44,4 +48,7 @@ module quality_gate {
     .then(resume).expect(s.phase == 3 and s.count == 2 and s.effects == 3 and not(s.feedback) and safety)
   run exhaustGotoTest = init.then(gateFail).then(retry).then(gateFail).then(retry).then(gateFail).then(exhaustedGoto)
     .expect(s.phase == 4 and not(s.feedback) and safety)
+  // A stop needs no retry budget, leaves no feedback, and skips the failure transition.
+  run stopTest = init.then(gateFail).then(retry).then(gateStop).then(resume)
+    .expect(s.phase == 5 and s.count == 1 and s.effects == 2 and not(s.feedback) and safety)
 }

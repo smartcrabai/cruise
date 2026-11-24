@@ -30,7 +30,8 @@ fn schema_accepts_prompt_forms_and_group_internal_gates() {
     for field in ["prompt", "prompt_file"] {
         let mut step = json!({"quality_gates": [
             {"command": "cargo test"},
-            {"command": "cargo clippy", "timeout": "10m"}
+            {"command": "cargo clippy", "timeout": "10m"},
+            {"command": "guard", "stop_exit_codes": [75]}
         ]});
         step[field] = json!("example");
         check(&json!({"steps": {"main": step}}), true);
@@ -57,6 +58,9 @@ fn schema_rejects_invalid_gate_arrays_and_items() {
         json!([{"command": 42}]),
         json!([{"command": "true", "timeout": 10}]),
         json!([{"command": "true", "unexpected": true}]),
+        json!([{"command": "true", "stop_exit_codes": []}]),
+        json!([{"command": "true", "stop_exit_codes": [0]}]),
+        json!([{"command": "true", "stop_exit_codes": [256]}]),
     ] {
         check(
             &json!({"steps": {"main": {"prompt": "work", "quality_gates": gates}}}),

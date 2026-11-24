@@ -379,6 +379,53 @@ fn verify_builtin_repair_policy(project: &Path) {
     }
 }
 
+const TDD_E2E_STEPS: &[&str] = &["e2e-baseline", "e2e"];
+const REFACTOR_E2E_STEPS: &[&str] = &[
+    "prepare-e2e-baseline",
+    "prepare-e2e",
+    "e2e-final-baseline",
+    "e2e-final-check",
+];
+
+/// Each E2E prompt is guarded against tooling changes since its own baseline,
+/// and a reported run stops the session when blocked.
+fn assert_e2e_guard_wiring(name: &str, compiled: &CompiledWorkflow, e2e_steps: &[&str]) {
+    for pair in e2e_steps.chunks(2) {
+        let [baseline, step] = pair else {
+            panic!("{name} E2E steps must pair a baseline with a prompt");
+        };
+        let baseline_command = format!("internal e2e-baseline {step}");
+        assert!(
+            compiled.steps[*baseline]
+                .command
+                .as_ref()
+                .is_some_and(|command| command
+                    .as_slice()
+                    .iter()
+                    .any(|line| line.ends_with(&baseline_command))),
+            "{name} {baseline} must record the {step} baseline"
+        );
+        let gates = compiled.steps[*step]
+            .quality_gates
+            .as_deref()
+            .unwrap_or_else(|| panic!("{name} {step} must have the E2E guard gate"));
+        let [gate] = gates else {
+            panic!("{name} {step} must have exactly one gate");
+        };
+        assert!(
+            gate.command.contains(&format!("internal e2e-guard {step}")),
+            "{name} {step}: {}",
+            gate.command
+        );
+        let reports = gate.command.contains("--report");
+        assert_eq!(
+            gate.stop_exit_codes.as_deref() == Some(&[75][..]),
+            reports,
+            "{name} {step} must stop on a blocked report"
+        );
+    }
+}
+
 fn assert_builtin_e2e_contract(project: &Path) {
     for name in ["tdd", "refactor"] {
         let builtin = BUILTIN_WORKFLOWS
@@ -412,10 +459,10 @@ fn assert_builtin_e2e_contract(project: &Path) {
             .collect::<FlagValues>();
         let off = flags::preflight_skips(&compiled, &FlagValues::new(), &[]);
         let on = flags::preflight_skips(&compiled, &enabled, &[]);
-        let expected_e2e_steps: &[&str] = if name == "tdd" {
-            &["e2e"]
+        let expected_e2e_steps = if name == "tdd" {
+            TDD_E2E_STEPS
         } else {
-            &["prepare-e2e", "e2e-final-check"]
+            REFACTOR_E2E_STEPS
         };
         let actual_e2e_steps = compiled
             .steps
@@ -436,6 +483,7 @@ fn assert_builtin_e2e_contract(project: &Path) {
             );
             assert!(!on.contains(&step.to_string()), "{name} gated {step} on");
         }
+        assert_e2e_guard_wiring(name, &compiled, expected_e2e_steps);
 
         let step_ids = compiled
             .steps
