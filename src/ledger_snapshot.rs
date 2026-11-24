@@ -13,8 +13,8 @@ const LEDGER_NAME: &str = "cruise-findings-ledger.md";
 const APPLY_OUTPUT_NAME: &str = "analysis/apply-output.md";
 const INVALID_LEDGER: &str = "head: invalid\nsnapshot: invalid\niteration: 0\n";
 
-struct LedgerRecords<'a> {
-    body: &'a str,
+struct LedgerRecords {
+    body: String,
     iteration: u64,
 }
 
@@ -76,7 +76,7 @@ pub(crate) fn refresh_after_apply(cwd: &Path, plan_path: &Path) -> Result<()> {
     crate::artifacts::write(&artifacts_root, LEDGER_NAME, &contents)
 }
 
-fn ledger_records(output: &str) -> Result<LedgerRecords<'_>> {
+fn ledger_records(output: &str) -> Result<LedgerRecords> {
     let mut marker_end = None;
     let mut offset = 0;
     for line in output.split_inclusive('\n') {
@@ -138,24 +138,41 @@ fn ledger_records(output: &str) -> Result<LedgerRecords<'_>> {
         .ok()
         .filter(|iteration| *iteration > 0)
         .ok_or_else(|| snapshot_error("ledger iteration is missing or malformed"))?;
-    validate_ledger_entries(entries)?;
+    let entries = validate_ledger_entries(entries)?;
+    let body = if entries.is_empty() {
+        format!("iteration: {iteration}\n")
+    } else {
+        format!("iteration: {iteration}\n\n{entries}")
+    };
 
     Ok(LedgerRecords { body, iteration })
 }
 
-fn validate_ledger_entries(entries: &str) -> Result<()> {
-    if entries.is_empty() {
-        return Ok(());
-    }
-
-    let mut ids = HashSet::new();
-    for record in entries.split("\n\n") {
-        let mut lines = record.lines();
-        let Some(header) = lines.next().and_then(|line| line.strip_prefix("### ")) else {
+/// Validate ledger records and return them in canonical form: one blank line
+/// between records, no other blank lines.
+///
+/// Records are delimited by their `### ` headings, so a missing or doubled
+/// blank line between records is not a format error; every non-blank line must
+/// still be a heading, summary, evidence, or `protects:` field.
+fn validate_ledger_entries(entries: &str) -> Result<String> {
+    let mut records: Vec<Vec<&str>> = Vec::new();
+    for line in entries.lines().filter(|line| !line.trim().is_empty()) {
+        if line.starts_with("### ") {
+            records.push(vec![line]);
+        } else if let Some(record) = records.last_mut() {
+            record.push(line);
+        } else {
             return Err(snapshot_error(
                 "ledger record must start with a finding heading",
             ));
-        };
+        }
+    }
+
+    let mut ids = HashSet::new();
+    for record in &records {
+        // Grouping above starts every record with its `### ` heading line.
+        let header = &record[0]["### ".len()..];
+        let mut lines = record[1..].iter().copied();
         let mut fields = header.split(" | ");
         let (Some(id), Some(state), Some(severity), Some(location)) =
             (fields.next(), fields.next(), fields.next(), fields.next())
@@ -188,7 +205,7 @@ fn validate_ledger_entries(entries: &str) -> Result<()> {
                 "ledger finding summary and evidence must not be blank",
             ));
         }
-        if let Some(protects) = lines.next() {
+        for protects in lines {
             let Some(value) = protects.strip_prefix("- protects: ") else {
                 return Err(snapshot_error("ledger record contains an unexpected field"));
             };
@@ -199,11 +216,12 @@ fn validate_ledger_entries(entries: &str) -> Result<()> {
                 return Err(snapshot_error("ledger protects field is malformed"));
             }
         }
-        if lines.next().is_some() {
-            return Err(snapshot_error("ledger record contains unexpected text"));
-        }
     }
-    Ok(())
+    Ok(records
+        .iter()
+        .map(|record| record.join("\n"))
+        .collect::<Vec<_>>()
+        .join("\n\n"))
 }
 
 fn valid_record_id(value: &str) -> bool {
@@ -233,10 +251,7 @@ fn previous_ledger(ledger: &str) -> Option<PreviousLedger<'_>> {
         .strip_prefix("iteration: ")?
         .parse::<u64>()
         .ok()?;
-    let mut entries = fields.next()?.strip_prefix('\n')?;
-    if let Some(without_final_newline) = entries.strip_suffix('\n') {
-        entries = without_final_newline;
-    }
+    let entries = fields.next()?.strip_prefix('\n')?;
     if !valid_oid(head) || !valid_oid(snapshot) || iteration == 0 {
         return None;
     }
@@ -578,5 +593,59 @@ mod tests {
         assert!(
             ledger_records("## Ledger Records\n```text\niteration: 1\n\n```\nafter\n").is_err()
         );
+    }
+
+    #[test]
+    fn accepts_unseparated_records_and_repeated_protects_in_canonical_form() {
+        with_session(|repo, plan, artifacts| {
+            init_repo(repo);
+            let head = String::from_utf8(git(repo, &["rev-parse", "--verify", "HEAD"]))
+                .unwrap_or_else(|error| panic!("HEAD was not UTF-8: {error}"))
+                .trim()
+                .to_string();
+            crate::artifacts::write(
+                artifacts,
+                APPLY_OUTPUT_NAME,
+                &apply_output(
+                    1,
+                    "### REV-1 | resolved | major | src/a.rs:1\n- summary: first\n- evidence: fixed\n- protects: guard at src/a.rs:2\n- protects: check at src/b.rs:3\n### DOC-1 | resolved | minor | README.md:4\n- summary: second\n- evidence: documented\n\n\n### SIMP-1 | wont-fix | minor | src/c.rs:5\n- summary: third\n- evidence: protected\n",
+                ),
+            )
+            .unwrap_or_else(|error| panic!("failed to update apply output: {error}"));
+
+            refresh_after_apply(repo, plan)
+                .unwrap_or_else(|error| panic!("snapshot failed: {error}"));
+
+            assert_eq!(
+                ledger_content(artifacts),
+                format!(
+                    "head: {head}\nsnapshot: {head}\niteration: 1\n\n### REV-1 | resolved | major | src/a.rs:1\n- summary: first\n- evidence: fixed\n- protects: guard at src/a.rs:2\n- protects: check at src/b.rs:3\n\n### DOC-1 | resolved | minor | README.md:4\n- summary: second\n- evidence: documented\n\n### SIMP-1 | wont-fix | minor | src/c.rs:5\n- summary: third\n- evidence: protected\n"
+                )
+            );
+
+            crate::artifacts::write(
+                artifacts,
+                APPLY_OUTPUT_NAME,
+                &apply_output(
+                    2,
+                    "### REV-1 | resolved | major | src/a.rs:1\n- summary: first\n- evidence: fixed\n",
+                ),
+            )
+            .unwrap_or_else(|error| panic!("failed to update apply output: {error}"));
+            refresh_after_apply(repo, plan)
+                .unwrap_or_else(|error| panic!("canonical ledger was not fresh: {error}"));
+        });
+    }
+
+    #[test]
+    fn rejects_stray_text_inside_records() {
+        for entries in [
+            "### REV-1 | resolved | major | src/a.rs:1\n- summary: first\n- evidence: fixed\nstray text\n",
+            "### REV-1 | resolved | major | src/a.rs:1\n- summary: first\n- evidence: fixed\n- protects: guard at src/a.rs:2\n- note: extra\n",
+            "### REV-1 | resolved | major | src/a.rs:1\n- summary: first\n- evidence: fixed\n### REV-1 | resolved | major | src/a.rs:1\n- summary: duplicate\n- evidence: same id\n",
+        ] {
+            let output = format!("## Ledger Records\n```text\niteration: 1\n\n{entries}```\n");
+            assert!(ledger_records(&output).is_err(), "accepted: {entries}");
+        }
     }
 }
