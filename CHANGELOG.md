@@ -56,6 +56,7 @@
 
 ### Fixed
 
+- Stop failing after-PR `push-after-sync` with `resolver added or removed untracked or ignored paths outside the conflict` when the conflict resolver's checks create, rewrite, or prune ignored caches such as `node_modules/.vitest-cache`. The host now compares only untracked, non-ignored paths; ignored files never enter the host commit, and added or removed untracked files outside the conflict still block it. Sessions already stopped by this error must abort the merge and sync the base again.
 - Discard unapproved Manager corrective previews when retrying Goal verification. Discarded previews stay in the Goal audit history and cannot be approved, even if verification fails again at the same tip.
 - Stop reporting a just-submitted Manager conversation turn as `interrupted` when a concurrent status request reads the record before the turn is published as running.
 - Clean up session worktrees from their shared Git directory when the recorded base directory has been removed, and allow session deletion when both paths are gone.

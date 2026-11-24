@@ -168,8 +168,7 @@ pub(crate) fn record_sync_result(
                 return Err(other("classified merge conflict has no unmerged paths"));
             }
             let index_digest = digest(&git(root, &["ls-files", "--stage", "-z"])?.stdout);
-            let untracked_paths_digest =
-                digest(&git(root, &["ls-files", "--others", "-z"])?.stdout);
+            let untracked_paths_digest = untracked_paths_digest(root)?;
             write_sync_result(
                 plan,
                 &SyncResult::MergeConflict {
@@ -686,7 +685,7 @@ fn verify_merge_commit(
 fn ensure_resolution_scope(
     root: &Path,
     conflict_paths: &BTreeSet<Vec<u8>>,
-    untracked_paths_digest: &str,
+    recorded_untracked_digest: &str,
 ) -> Result<()> {
     for path in nul_paths(&git(root, &["diff", "--no-ext-diff", "--name-only", "-z"])?.stdout)? {
         if !conflict_paths.contains(&path) {
@@ -695,13 +694,22 @@ fn ensure_resolution_scope(
             ));
         }
     }
-    let current_untracked = git(root, &["ls-files", "--others", "-z"])?.stdout;
-    if digest(&current_untracked) != untracked_paths_digest {
+    if untracked_paths_digest(root)? != recorded_untracked_digest {
         return Err(other(
-            "resolver added or removed untracked or ignored paths outside the conflict",
+            "resolver added or removed untracked paths outside the conflict",
         ));
     }
     Ok(())
+}
+
+/// Digest of untracked, non-ignored paths. Ignored paths are left out: the host
+/// stages only the recorded conflict paths, so ignored files never reach the
+/// commit or push, and verification caches (`node_modules/.vitest-cache`,
+/// `*.tsbuildinfo`) may legitimately be created, rewritten, or pruned.
+fn untracked_paths_digest(root: &Path) -> Result<String> {
+    Ok(digest(
+        &git(root, &["ls-files", "--others", "--exclude-standard", "-z"])?.stdout,
+    ))
 }
 
 fn verify_call_identity(
@@ -1558,8 +1566,11 @@ mod tests {
         git_ok(&repo, &["add", "--all"]);
         git_ok(&repo, &["commit", "-m", "base"]);
         git_ok(&repo, &["branch", "-M", "main"]);
-        fs::write(repo.join(".git/info/exclude"), "existing-ignored.txt\n")
-            .unwrap_or_else(|error| panic!("write ignore rule: {error}"));
+        fs::write(
+            repo.join(".git/info/exclude"),
+            "existing-ignored.txt\n.cache/\n",
+        )
+        .unwrap_or_else(|error| panic!("write ignore rule: {error}"));
         fs::write(
             repo.join("existing-ignored.txt"),
             "preexisting ignored file\n",
@@ -1616,9 +1627,8 @@ mod tests {
                 merge_head: merge_head.clone(),
                 conflict_paths: paths.iter().map(|path| encode_hex(path)).collect(),
                 index_digest: digest(&git_ok(&repo, &["ls-files", "--stage", "-z"]).stdout),
-                untracked_paths_digest: digest(
-                    &git_ok(&repo, &["ls-files", "--others", "-z"]).stdout,
-                ),
+                untracked_paths_digest: untracked_paths_digest(&repo)
+                    .unwrap_or_else(|error| panic!("digest untracked paths: {error}")),
             },
         )
         .unwrap_or_else(|error| panic!("record fixture conflict: {error}"));
@@ -1824,25 +1834,52 @@ mod tests {
     }
 
     #[test]
-    fn new_ignored_paths_and_failed_commit_preserve_a_resumable_conflict() {
+    fn verification_cache_churn_in_ignored_paths_does_not_block_conflict_commit() {
+        let fixture = conflict_fixture();
+        resolver_output(&fixture.plan);
+        resolve_conflict(&fixture.repo);
+        // Type checks and test runners create, rewrite, and prune ignored caches.
+        fs::remove_file(fixture.repo.join("existing-ignored.txt"))
+            .unwrap_or_else(|error| panic!("prune ignored file: {error}"));
+        fs::create_dir_all(fixture.repo.join(".cache/vitest"))
+            .unwrap_or_else(|error| panic!("create ignored cache: {error}"));
+        fs::write(fixture.repo.join(".cache/vitest/results.json"), "{}\n")
+            .unwrap_or_else(|error| panic!("write ignored cache: {error}"));
+
+        finish_conflict_commit(&fixture.plan, &fixture.repo)
+            .unwrap_or_else(|error| panic!("ignored cache churn must not block: {error}"));
+
+        assert_eq!(
+            String::from_utf8_lossy(
+                &git_ok(&fixture.repo, &["ls-tree", "-r", "--name-only", "HEAD"]).stdout
+            ),
+            "conflict.txt\nunrelated.txt\n",
+            "ignored files must never enter the host merge commit"
+        );
+    }
+
+    #[test]
+    fn new_untracked_paths_and_failed_commit_preserve_a_resumable_conflict() {
         let fixture = conflict_fixture();
         resolver_output(&fixture.plan);
         resolve_conflict(&fixture.repo);
         let original_index = digest(&git_ok(&fixture.repo, &["ls-files", "--stage", "-z"]).stdout);
 
         fs::write(
-            fixture.repo.join(".git/info/exclude"),
-            "existing-ignored.txt\nignored-after-prompt.txt\n",
+            fixture.repo.join("untracked-after-prompt.txt"),
+            "unrelated\n",
         )
-        .unwrap_or_else(|error| panic!("write ignore rules: {error}"));
-        fs::write(fixture.repo.join("ignored-after-prompt.txt"), "unrelated\n")
-            .unwrap_or_else(|error| panic!("create ignored file: {error}"));
+        .unwrap_or_else(|error| panic!("create untracked file: {error}"));
         let error = finish_conflict_commit(&fixture.plan, &fixture.repo)
             .err()
-            .unwrap_or_else(|| panic!("new ignored paths must block conflict commit"));
-        assert!(error.to_string().contains("untracked or ignored"));
-        fs::remove_file(fixture.repo.join("ignored-after-prompt.txt"))
-            .unwrap_or_else(|error| panic!("remove ignored file: {error}"));
+            .unwrap_or_else(|| panic!("new untracked paths must block conflict commit"));
+        assert!(
+            error
+                .to_string()
+                .contains("untracked paths outside the conflict")
+        );
+        fs::remove_file(fixture.repo.join("untracked-after-prompt.txt"))
+            .unwrap_or_else(|error| panic!("remove untracked file: {error}"));
         assert_eq!(
             digest(&git_ok(&fixture.repo, &["ls-files", "--stage", "-z"]).stdout),
             original_index

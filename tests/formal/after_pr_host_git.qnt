@@ -8,7 +8,7 @@ module after_pr_host_git {
     evidenceHead: int, evidenceTree: int, evidenceStatus: int,
     evidenceNoEgress: bool, evidenceIndexClean: bool,
     bindingHead: int, bindingTrusted: bool,
-    initialConflictPaths: int, committedPaths: int,
+    initialConflictPaths: int, committedPaths: int, strayUntracked: bool,
     publications: int, blockedAt: int,
     ciGreen: bool, retriedHeads: Set[int], retryHead: int, retryOutcome: int,
     failureKind: int, unacquiredReruns: int -> int,
@@ -36,7 +36,7 @@ module after_pr_host_git {
     evidenceHead: -1, evidenceTree: -1, evidenceStatus: 0,
     evidenceNoEgress: false, evidenceIndexClean: false,
     bindingHead: -1, bindingTrusted: false,
-    initialConflictPaths: 0, committedPaths: 0,
+    initialConflictPaths: 0, committedPaths: 0, strayUntracked: false,
     publications: 0, blockedAt: 0,
     ciGreen: false, retriedHeads: Set(), retryHead: -1, retryOutcome: -1,
     failureKind: -1, unacquiredReruns: Map(0 -> 0, 1 -> 0, 2 -> 0),
@@ -89,10 +89,17 @@ module after_pr_host_git {
     s.workspaceHead == s.remoteHead, s.workspaceTree == s.remoteTree,
     Set(1, 2, 3).contains(paths),
     record({ ...s, phase: 2, initialConflictPaths: paths,
-      committedPaths: 0 }, "conflict") }
+      committedPaths: 0, strayUntracked: false }, "conflict") }
+  // Resolver verification may create, rewrite, or prune ignored caches. The
+  // host stages only conflict paths, so this never reaches the commit.
+  action resolverIgnoredChurn = all {
+    s.phase == 2, record(s, "ignoredChurn") }
+  // A new or removed untracked, non-ignored path outside the conflict.
+  action resolverStrayUntracked = all {
+    s.phase == 2, record({ ...s, strayUntracked: true }, "strayUntracked") }
   action commitConflict(paths: int, tree: int): bool = all {
     s.phase == 2, s.bindingTrusted, s.bindingHead == s.remoteHead,
-    s.workspaceHead == s.remoteHead, s.remoteHead < 2,
+    s.workspaceHead == s.remoteHead, s.remoteHead < 2, not(s.strayUntracked),
     paths == s.initialConflictPaths, Set(0, 1, 2, 3).contains(tree),
     record({ ...s, phase: 3, workspaceParentHead: s.remoteHead,
       workspaceHead: s.remoteHead + 1, workspaceTree: tree,
@@ -242,7 +249,8 @@ module after_pr_host_git {
     any {
       bindCurrent(observed), syncWorkspace, startWaitCI, ciPass, ciFail(kind),
       rerunUnacquired,
-      observeConflict(paths), commitConflict(paths, tree), pushConflict,
+      observeConflict(paths), resolverIgnoredChurn, resolverStrayUntracked,
+      commitConflict(paths, tree), pushConflict,
       suggestRepair(tree), verifyCandidate(observed, tree, flag, flag),
       failedVerification(observed, tree, flag, flag), unresolvedEvidence,
       pushRepair, workspaceDrift(tree), advanceRemote(nextHead, tree),
@@ -312,6 +320,7 @@ module after_pr_host_git {
       and s.initialConflictPaths != 0),
     event == "conflictCommit" implies (before.phase == 2
       and before.bindingTrusted and before.bindingHead == before.remoteHead
+      and not(before.strayUntracked)
       and s.committedPaths == before.initialConflictPaths
       and s.workspaceParentHead == before.remoteHead
       and s.workspaceHead == before.remoteHead + 1),
@@ -400,6 +409,13 @@ module after_pr_host_git {
     .then(observeConflict(1)).then(commitConflict(1, 1)).then(pushConflict)
     .expect(s.phase == 4 and s.remoteHead == 1 and s.publications == 1
       and s.committedPaths == s.initialConflictPaths and safety)
+  run ignoredCacheChurnStillPublishesConflictTest = init.then(bindCurrent(0))
+    .then(observeConflict(1)).then(resolverIgnoredChurn)
+    .then(commitConflict(1, 1)).then(pushConflict)
+    .expect(s.phase == 4 and s.publications == 1 and safety)
+  run strayUntrackedPathBlocksConflictCommitTest = init.then(bindCurrent(0))
+    .then(observeConflict(1)).then(resolverIgnoredChurn)
+    .then(resolverStrayUntracked).then(commitConflict(1, 1)).fail()
   run freshConflictAfterPublicationUsesNewBindingTest = init.then(bindCurrent(0))
     .then(observeConflict(1)).then(commitConflict(1, 1)).then(pushConflict)
     .then(bindCurrent(1)).then(observeConflict(2)).then(commitConflict(2, 3)).then(pushConflict)
