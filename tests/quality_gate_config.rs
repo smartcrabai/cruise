@@ -57,6 +57,22 @@ fn blank_gate_command_is_rejected() {
 }
 
 #[test]
+fn stop_exit_codes_must_be_nonempty_and_nonzero() {
+    let valid = parse(
+        "command: [echo]\nsteps:\n  implement:\n    prompt: implement\n    quality_gates: [{command: 'true', stop_exit_codes: [75]}]\n",
+    );
+    validate_config(&valid).unwrap_or_else(|error| panic!("stop codes should validate: {error}"));
+    for codes in ["[]", "[0]", "[0, 75]"] {
+        assert_invalid_gate(
+            &format!(
+                "steps:\n  implement:\n    prompt: implement\n    quality_gates: [{{command: 'true', stop_exit_codes: {codes}}}]\n"
+            ),
+            "stop_exit_codes",
+        );
+    }
+}
+
+#[test]
 fn zero_gate_timeout_is_rejected() {
     let config = parse(
         "steps:\n  implement:\n    prompt: implement\n    quality_gates: [{command: 'true', timeout: '0'}]\n",

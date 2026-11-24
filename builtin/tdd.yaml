@@ -560,16 +560,39 @@ steps:
       ## Execution and CI
 
       Add all three specs/runners to reproducible dependency/install setup and provider-native CI, with pinned compatible versions and no secret-dependent PR execution. Run all checks from the repository; fix genuine source/spec defects according to requirements, never weaken invariants/assertions for green, and rerun affected checks. Report exact commands, versions, results, Alloy receipts, Quint bounds, CI files, defects fixed, and concrete missing prerequisites. Missing runner/platform is blocked, never a pass.
+  e2e-baseline:
+    flag: e2e
+    command: '{cruise.bin} internal e2e-baseline e2e'
+    env:
+      CRUISE_E2E_PLAN: '{plan}'
+    accepted_exit_codes: [0]
   e2e:
     flag: e2e
+    output_file: e2e/report.md
+    env:
+      CRUISE_E2E_PLAN: '{plan}'
+    quality_gates:
+      - command: '{cruise.bin} internal e2e-guard e2e --report e2e/report.md'
+        timeout: 5m
+        stop_exit_codes: [75]
     prompt: |-
-      Add and run real UI end-to-end coverage for in-scope targets in {plan}. Read the plan; this flag covers UI E2E only. Ordinary CLI/TUI, HTTP API, Testcontainers service, Pact contract, and other default test-stack coverage stays in the ordinary test-first workflow.
+      Add and run real UI end-to-end coverage for in-scope targets in {plan} with tooling already in this repository. Read the plan; this flag covers UI E2E only. Ordinary CLI/TUI, HTTP API, Testcontainers service, Pact contract, and other default test-stack coverage stays in the ordinary test-first workflow.
 
-      Inspect repository manifests, source entry points, existing tests, and CI to identify actual UI targets. Run `cruise docs e2e`, then run `cruise docs e2e <framework>` for each actual target matching a policy ID in that output. Follow the common policy and each selected framework policy.
+      Inspect repository manifests, source entry points, existing tests, and CI to identify actual UI targets. Run `cruise docs e2e`, then run `cruise docs e2e <framework>` for each actual target matching a policy ID in that output. Follow the common policy, including its `e2e` flag tooling boundary, and each selected framework policy.
 
-      For each applicable target, complete visual and saved assertion-bearing E2E capabilities separately as policy allows. Do reachable work if one is unavailable; report exact missing capability/blocker and never claim both completed. Run applicable saved suites and diagnostic checks; fix genuine defects without weakening assertions, then rerun affected checks. Wire reproducible suites into existing provider-native CI when available and secret-free.
+      ## Tooling boundary
 
-      If no UI target applies, report not applicable with repository evidence; add no fake suite. Report each target, tools/versions, exact setup/build/test commands and results, assertions and reset/isolation, saved screenshot paths and pixel-inspection evidence, CI changes, failures fixed, missing capabilities, blockers, and unverified scope. Keep default test-stack results separate from UI E2E. Never ask the user; this step runs unattended.
+      A host guard compares the working tree with its state when this step started. Use only test tools, runners, devices, and dependencies the repository and environment already provide. Do not install, download, add, upgrade, or downgrade dependencies, toolchains, or test tools; do not edit dependency manifests, lockfiles, toolchain pins, or CI configuration; do not introduce an E2E framework the repository does not already use. Never substitute another target, platform build, or runner (for example, a web export for a native app) for one that cannot run. Framework recommendations are preparation to report, not tools to add here.
+
+      ## Work
+
+      For each applicable target, complete visual and saved assertion-bearing E2E capabilities separately with existing tooling. When a capability needs a missing tool, device, simulator, service, app build, or credential, do the remaining reachable work, then report that capability as blocked; never claim both completed. Run applicable saved suites and diagnostic checks; fix genuine defects without weakening assertions, then rerun affected checks. If no UI target applies, report not applicable with repository evidence; add no fake suite. Never ask the user; this step runs unattended.
+
+      ## Report
+
+      Report each target, tools/versions, exact setup/build/test commands and results, assertions and reset/isolation, saved screenshot paths and pixel-inspection evidence, failures fixed, CI wiring the suite still needs, and unverified scope. Keep default test-stack results separate from UI E2E.
+
+      When any capability is blocked, add a `## Blockers` section: one entry per blocked target/capability stating what is missing, the command and result proving it, and the exact preparation the user must make. End with exactly one status line: `E2E_STATUS: passed` when every applicable capability completed, `E2E_STATUS: blocked` when any capability is blocked, or `E2E_STATUS: not-applicable` when no in-scope UI target exists. A blocked status stops the session before review and PR creation with the blockers as its failure reason.
   verify-review-pass:
     group: verify-review
 after-pr:

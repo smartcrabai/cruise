@@ -204,6 +204,8 @@ gate 失敗時は通常遷移を適用する前に同じ prompt step を retry �
 
 retry は既存の edge ごとの budget（`--max-retries`、なければ top-level `max_retries`、それもなければ3）に従い、同じ step の他の self-retry と共有します。上限到達時に `if.fail: <step>` があればその step にジャンプし、それ以外は cruise が `QualityGateExhausted` で停止します。
 
+prompt の retry では直せない失敗（前提条件の不足など）を返す gate には `stop_exit_codes`（0 以外の exit code を 1 つ以上並べた list）を指定します。gate が列挙した code で終了すると、cruise は feedback を残さず、retry budget と `if.fail` を使わずに `QualityGateStopped` で停止し、無害化した gate output を失敗理由にします。session を resume すると同じ prompt step を再実行します。組み込みの E2E guard は `stop_exit_codes: [75]` を使います。
+
 prompt と `prompt_file` step（group 内の個々の step を含む）には gate を指定できます。parallel parent/child、`after-pr` step、group または `workflow_call` call site、prompt 以外の step では拒否されます。gate command は通常の `command` step と同様に shell command を実行します。信頼できる workflow 設定のみで使用してください。
 
 <a id="step-groups"></a>

@@ -134,26 +134,35 @@ mod contracts {
         );
     }
 
-    #[when(regex = r"^I compile a quality gate (retry|exhaustion|error) workflow$")]
+    #[when(regex = r"^I compile a quality gate (retry|exhaustion|error|stop) workflow$")]
     fn quality_workflow(w: &mut CheckpointWorld, kind: String) {
         let kind = kind.into_boxed_str();
-        let gate = if &*kind == "retry" {
-            "if [ -f attempted ]; then printf passed >> gates; exit 0; fi; touch attempted; printf 'gate diagnostic'; printf ' gate stderr' >&2; exit 1"
-        } else {
-            "printf first >> gates; exit 1"
+        let gate = match &*kind {
+            "retry" => {
+                "if [ -f attempted ]; then printf passed >> gates; exit 0; fi; touch attempted; printf 'gate diagnostic'; printf ' gate stderr' >&2; exit 1"
+            }
+            "stop" => {
+                "if [ -f prepared ]; then printf passed >> gates; exit 0; fi; printf blocked >> gates; printf 'missing simulator'; exit 75"
+            }
+            _ => "printf first >> gates; exit 1",
         };
-        let failure = if &*kind == "exhaustion" {
+        let stop = if &*kind == "stop" {
+            "        stop_exit_codes: [75]\n"
+        } else {
+            ""
+        };
+        let failure = if matches!(&*kind, "exhaustion" | "stop") {
             "    if:\n      fail: recovery\n"
         } else {
             ""
         };
-        let recovery = if &*kind == "exhaustion" {
+        let recovery = if matches!(&*kind, "exhaustion" | "stop") {
             "  recovery:\n    command: 'touch recovered'\n"
         } else {
             ""
         };
         let yaml = format!(
-            "command: [sh, -c, 'cat > prompt-$(wc -c < visits | tr -d \" \"); printf x >> visits']\nsteps:\n  work:\n    prompt: implement\n    quality_gates:\n      - command: \"{gate}\"\n      - command: 'printf second >> gates'\n{failure}    next: success\n  success:\n    command: 'touch success'\n{recovery}"
+            "command: [sh, -c, 'cat > prompt-$(wc -c < visits | tr -d \" \"); printf x >> visits']\nsteps:\n  work:\n    prompt: implement\n    quality_gates:\n      - command: \"{gate}\"\n{stop}      - command: 'printf second >> gates'\n{failure}    next: success\n  success:\n    command: 'touch success'\n{recovery}"
         );
         // The recorder is a real subprocess standing in for the external agent, while
         // the workflow, gate subprocesses, transitions and persistence are production code.
@@ -249,6 +258,31 @@ mod contracts {
         assert_eq!(w.contents("visits"), "x");
         assert_eq!(w.contents("gates"), "first");
         assert!(!w.dir().join("success").exists());
+    }
+
+    #[then("a stop status fails without retry and resume reruns the prompt")]
+    async fn gate_stop(w: &mut CheckpointWorld) {
+        let mut graph = w.graph(2);
+        let result = run(w, &mut graph, 2).await;
+        assert!(
+            matches!(&result, Err(CruiseError::QualityGateStopped { reason, .. }) if reason == "missing simulator"),
+            "{result:?}"
+        );
+        assert_eq!(w.contents("visits"), "x");
+        assert_eq!(w.contents("gates"), "blocked");
+        assert!(!w.dir().join("recovered").exists());
+        assert!(!w.dir().join("success").exists());
+        let saved = load_graph(&w.dir().join("dag.json")).unwrap();
+        assert!(saved.state.runtime.quality_gate_feedback.is_none());
+
+        std::fs::write(w.dir().join("prepared"), "").unwrap();
+        let mut resumed = w.graph(2);
+        resumed.restore(&saved).unwrap();
+        run(w, &mut resumed, 2).await.unwrap();
+        assert_eq!(w.contents("visits"), "xx");
+        assert!(!w.contents("prompt-1").contains("Quality gate failed"));
+        assert_eq!(w.contents("gates"), "blockedpassedsecond");
+        assert!(w.dir().join("success").exists());
     }
 
     #[then("accepted counts survive repeated resumes and lowered ceilings")]

@@ -93,6 +93,13 @@ pub struct QualityGateConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub timeout: Option<String>,
+    /// Nonzero exit codes that stop the step without retrying its prompt.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub stop_exit_codes: Option<Vec<u8>>,
 }
 
 // An omitted field is optional, but an explicitly present field must have its
@@ -1500,6 +1507,13 @@ pub(crate) fn validate_quality_gates(config: &WorkflowConfig) -> crate::error::R
                 if let Some(timeout) = &gate.timeout {
                     crate::timeout::parse_timeout(timeout)
                         .map_err(|_| invalid("has an invalid timeout"))?;
+                }
+                if let Some(codes) = &gate.stop_exit_codes
+                    && (codes.is_empty() || codes.contains(&0))
+                {
+                    return Err(invalid(
+                        "stop_exit_codes must list at least one nonzero exit code",
+                    ));
                 }
             }
         }

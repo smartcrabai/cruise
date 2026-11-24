@@ -208,22 +208,35 @@ steps:
       Before selecting/preparing/using Quint, Alloy, or Gherkin, inspect/load relevant available installed skills through the executing agent's skill mechanism, if provided. Skills are optional: do not assume names/loader, install/create skills, or let guidance replace tools/repo requirements.
 
       If no in-scope behavior is modelable without invented requirements, make no changes and explain evidence. Otherwise implement all three forms (Quint, Alloy, Gherkin) and the smallest native CI/check integration that fails on counterexamples, assertions, undefined/pending steps, or tool errors. Output changed paths/commands or `NO_CHANGES_INTENTIONAL: no applicable formal model`.
+  prepare-e2e-baseline:
+    flag: e2e
+    command: '{cruise.bin} internal e2e-baseline prepare-e2e'
+    env:
+      CRUISE_E2E_PLAN: '{plan}'
+    accepted_exit_codes: [0]
   prepare-e2e:
     flag: e2e
     output_file: refactor/e2e-preparation.md
+    env:
+      CRUISE_E2E_PLAN: '{plan}'
+    quality_gates:
+      - command: '{cruise.bin} internal e2e-guard prepare-e2e'
+        timeout: 5m
     prompt: |-
-      Prepare real UI E2E coverage in frozen scope. Preparation only: inspect the project and prepare feasible capabilities, including deterministic assertion-bearing source when tooling is present or policy permits. Do not launch the app or run E2E.
+      Prepare real UI E2E coverage in frozen scope with tooling already in this repository. Preparation only: inspect the project and prepare feasible capabilities, including deterministic assertion-bearing source only for E2E tooling the repository already uses. Do not launch the app or run E2E.
 
       <frozen-scope>
       {file:refactor/baseline.md}
       </frozen-scope>
       Task: {input}
 
-      Identify actual in-scope UI targets from repo evidence. Run `cruise docs e2e`, then `cruise docs e2e <framework>` for each matching policy ID listed for an actual target; follow common and selected framework policies. Keep ordinary CLI/TUI, HTTP API, Testcontainers service, Pact contract, and other default-stack tests in the ordinary workflow.
+      Identify actual in-scope UI targets from repo evidence. Run `cruise docs e2e`, then `cruise docs e2e <framework>` for each matching policy ID listed for an actual target; follow common policy, including its `e2e` flag tooling boundary, and selected framework policies. Keep ordinary CLI/TUI, HTTP API, Testcontainers service, Pact contract, and other default-stack tests in the ordinary workflow.
 
-      For each target, prepare visual interaction and saved assertion-bearing E2E separately: exact tools/versions, setup, repeatable commands, reset/isolation, assertions, screenshot states, and reproducible/available CI integration. If a capability is unavailable or blocked, prepare what remains and name the precise blocker; never claim both.
+      A host guard compares the working tree with its state when this step started. Do not install, download, add, upgrade, or downgrade dependencies, toolchains, or test tools; do not edit dependency manifests, lockfiles, toolchain pins, or CI configuration; do not introduce an E2E framework the repository does not already use; never substitute another target, platform build, or runner. Framework recommendations are preparation to report, not tools to add here.
 
-      Report targets, framework/policy IDs, changed paths, tools/versions, app setup/build/test commands, assertion/screenshot plans, isolation/reset, CI changes, blockers/missing capabilities. State no E2E suite ran. If no UI flow applies, give frozen-scope evidence and `NO_CHANGES_INTENTIONAL: no applicable E2E`.
+      For each target, prepare visual interaction and saved assertion-bearing E2E separately: exact existing tools/versions, setup, repeatable commands, reset/isolation, assertions, and screenshot states. If a capability is unavailable or blocked, prepare what remains and name the precise blocker and the exact preparation it needs; never claim both.
+
+      Report targets, framework/policy IDs, changed paths, tools/versions, app setup/build/test commands, assertion/screenshot plans, isolation/reset, CI wiring the suite still needs, blockers/missing capabilities. State no E2E suite ran. If no UI flow applies, give frozen-scope evidence and `NO_CHANGES_INTENTIONAL: no applicable E2E`.
   verify-refactor-pass:
     group: verify-refactor
   formal-final-check:
@@ -242,13 +255,27 @@ steps:
       </preparation>
 
       If no model applies, report and make no changes. Otherwise report each command, bounded proof scope/receipt, fixes, and final result. No vanity metrics.
+  e2e-final-baseline:
+    flag: e2e
+    command: '{cruise.bin} internal e2e-baseline e2e-final-check'
+    env:
+      CRUISE_E2E_PLAN: '{plan}'
+    accepted_exit_codes: [0]
   e2e-final-check:
     flag: e2e
     output_file: refactor/e2e-verification.md
+    env:
+      CRUISE_E2E_PLAN: '{plan}'
+    quality_gates:
+      - command: '{cruise.bin} internal e2e-guard e2e-final-check --report refactor/e2e-verification.md'
+        timeout: 5m
+        stop_exit_codes: [75]
     prompt: |-
       Read the E2E preparation report first. Relevant skills/MCP capabilities are optional; do not guess names, install tools, or configure MCP.
 
       Use frozen scope and exactly prepared targets, tools, versions, setup, screenshot plans, and commands. For prepared targets, run `cruise docs e2e` and matching `cruise docs e2e <framework>` policies for guidance, not runner selection. Do not reselect runners, widen scope, run unrelated suites, or substitute targets. Handle each target/capability independently; blockers must not stop feasible work. Carry exact blockers forward; a capability unavailable under no-new-tool policy is not a pass. If no UI flow applies, carry evidence forward and make no changes.
+
+      A host guard compares the working tree with its state when this step started. Do not install, download, add, upgrade, or downgrade dependencies, toolchains, or test tools; do not edit dependency manifests, lockfiles, toolchain pins, or CI configuration; do not introduce an E2E framework the repository does not already use.
 
       For each target, if visual tooling is available, use only the prepared visual tool to interact with the actual app, save meaningful screenshots, and inspect pixels. Run prepared assertion-bearing E2E with isolated/reset data when runnable, independently of prior exploration sessions and LLM/MCP decisions. Follow policy evidence/capability limits; do not claim unperformed work.
 
@@ -261,7 +288,9 @@ steps:
       {file:refactor/e2e-preparation.md}
       </preparation>
 
-      Report each target/capability as completed, not applicable, missing under policy, or blocked; give exact tools/versions/commands, actual app, assertions/results, reset/isolation, screenshot paths/pixel-inspection evidence, failures/fixes, CI changes, justified out-of-scope targets, and remaining blockers. If none applies, include `NO_CHANGES_INTENTIONAL: no applicable E2E`.
+      Report each target/capability as completed, not applicable, or blocked; give exact tools/versions/commands, actual app, assertions/results, reset/isolation, screenshot paths/pixel-inspection evidence, failures/fixes, CI wiring the suite still needs, and justified out-of-scope targets. If none applies, include `NO_CHANGES_INTENTIONAL: no applicable E2E`.
+
+      When any capability is blocked, add a `## Blockers` section: one entry per blocked target/capability stating what is missing, the command and result proving it, and the exact preparation the user must make. End with exactly one status line: `E2E_STATUS: passed` when every applicable capability completed, `E2E_STATUS: blocked` when any capability is blocked, or `E2E_STATUS: not-applicable` when no in-scope UI target exists. A blocked status stops the session with the blockers as its failure reason.
   final-verify:
     output_file: refactor/final-verification.md
     prompt: |-

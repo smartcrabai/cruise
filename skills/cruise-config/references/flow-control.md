@@ -190,9 +190,11 @@ steps:
     command: echo done
 ```
 
-The non-empty list contains objects with a required nonblank `command` and an optional positive `timeout` (seconds, `m`, or `h`); unknown fields are rejected. After a successful prompt, gates run in order and stop at the first nonzero exit, timeout, or signal. The normal transition, including `if.file-changed` and `if.head-changed`, is applied only after all gates pass. Gates also run for the last step, but not for skipped or failed attempts or an attempt discarded by `if.no-file-changes: retry`.
+The non-empty list contains objects with a required nonblank `command`, an optional positive `timeout` (seconds, `m`, or `h`), and optional `stop_exit_codes` (a nonempty list of nonzero exit codes); unknown fields are rejected. After a successful prompt, gates run in order and stop at the first nonzero exit, timeout, or signal. The normal transition, including `if.file-changed` and `if.head-changed`, is applied only after all gates pass. Gates also run for the last step, but not for skipped or failed attempts or an attempt discarded by `if.no-file-changes: retry`.
 
 Failure retries the same step using its existing self-edge budget, shared with other self-retries. The effective ceiling is `--max-retries`, then `max_retries`, then 3. With no earlier self-retries there are at most `1 + max_retries` gate attempts. At exhaustion, a named `if.fail: <step>` is taken; otherwise execution stops with `QualityGateExhausted`. `if.fail: {retry: true}` does not create a separate budget.
+
+A gate exit code listed in `stop_exit_codes` means retrying cannot help (for example, missing prerequisites): cruise records no feedback, ignores the retry budget and `if.fail`, and stops with `QualityGateStopped`, using the sanitized gate output as the failure reason. Resuming the session reruns the same prompt step. The built-in UI E2E guard uses `stop_exit_codes: [75]`.
 
 The next prompt receives a sanitized, bounded output excerpt as untrusted data. When available, a sanitized log is stored in session `artifacts/quality-gates/` outside the repository, subject to the artifact size limit. Feedback survives checkpoint/resume, clears when no retry is pending, and does not overwrite `{prev.*}`. Gate commands execute shell commands, so workflows must be trusted.
 
@@ -219,7 +221,7 @@ steps:
 3. Step has a recoverable failure (non-zero exit / recoverable prompt error / timeout / `no-file-changes: failed`) and `if.fail` is set → jump to its target, or re-execute on `retry: true`. A missing-model error from a jcode prompt bypasses `if.fail` and aborts the workflow.
 4. `no-file-changes: failed`, no files changed, and no `if.fail` → stop with Failed.
 5. `no-file-changes: retry` and no files changed → re-execute the same step without running gates.
-6. After a successful prompt, run `quality_gates` if present. Failure retries the step while budget remains; on exhaustion, jump to a named `if.fail` target or stop with `QualityGateExhausted`.
+6. After a successful prompt, run `quality_gates` if present. A `stop_exit_codes` status stops with `QualityGateStopped`; other failures retry the step while budget remains; on exhaustion, jump to a named `if.fail` target or stop with `QualityGateExhausted`.
 7. `if.file-changed` and files changed → jump to target (ignored when `if.no-file-changes` is also set).
 8. `if.head-changed` and `HEAD` changed → jump to target.
 9. An option step's selected `next:` → go to that step (`next: ~` falls through to rule 10/11).

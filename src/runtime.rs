@@ -1,8 +1,9 @@
 use crate::{
     app_config, backend, ci_followup, clean_cmd, cli, config_cmd, daemon, diff_cmd, docs_cmd,
-    draft_cmd, error, exec_cmd, host_sync, i18n, ledger_snapshot, list_cmd, manager_cmd, plan_cmd,
-    platform, provider_install, run_cmd, ssh_cmd, telemetry, tell_cmd, tool_policy, update_cmd,
-    usage_cmd, workflow_cmd, workflow_doctor, workflow_generate, workflow_make, worktree_pr,
+    draft_cmd, e2e_guard, error, exec_cmd, host_sync, i18n, ledger_snapshot, list_cmd, manager_cmd,
+    plan_cmd, platform, provider_install, run_cmd, ssh_cmd, telemetry, tell_cmd, tool_policy,
+    update_cmd, usage_cmd, workflow_cmd, workflow_doctor, workflow_generate, workflow_make,
+    worktree_pr,
 };
 
 // Hooks run once per tool call, without constructing a runtime or telemetry.
@@ -202,6 +203,31 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
             &std::env::current_dir()?,
             &path_from_env("CRUISE_TDD_LEDGER_PLAN")?,
         ),
+        Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::E2eBaseline { step },
+        })) => e2e_guard::record_baseline(
+            &std::env::current_dir()?,
+            &path_from_env("CRUISE_E2E_PLAN")?,
+            &step,
+        ),
+        Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::E2eGuard { step, report },
+        })) => match e2e_guard::check(
+            &std::env::current_dir()?,
+            &path_from_env("CRUISE_E2E_PLAN")?,
+            &step,
+            report.as_deref(),
+        )? {
+            e2e_guard::Verdict::Pass => Ok(()),
+            e2e_guard::Verdict::Violation(message) => {
+                print!("{message}");
+                std::process::exit(1);
+            }
+            e2e_guard::Verdict::Blocked(message) => {
+                print!("{message}");
+                std::process::exit(e2e_guard::BLOCKED_EXIT_CODE);
+            }
+        },
         Some(cli::Commands::Internal(cli::InternalArgs {
             command: cli::InternalCommand::FinishConflictCommit,
         })) => host_sync::finish_conflict_commit(

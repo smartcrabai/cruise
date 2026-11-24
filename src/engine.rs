@@ -1006,10 +1006,10 @@ async fn step_loop_iteration(
             // Resolve each gate only when it is reached. A failing earlier gate
             // must not be masked by an unresolved variable in a later command.
             let mut failure = None;
-            for gate in gates {
+            for gate_config in gates {
                 let gate = crate::quality_gate::ResolvedGate {
-                    command: vars.resolve(&gate.command)?,
-                    timeout: gate
+                    command: vars.resolve(&gate_config.command)?,
+                    timeout: gate_config
                         .timeout
                         .as_deref()
                         .map(crate::timeout::parse_timeout)
@@ -1021,13 +1021,25 @@ async fn step_loop_iteration(
                     ctx.working_dir,
                     ctx.cancel_token,
                 )
-                .await?;
+                .await?
+                .map(|failure| (failure, gate_config.stop_exit_codes.as_deref()));
                 if failure.is_some() {
                     break;
                 }
             }
-            if let Some(failure) = failure {
+            if let Some((failure, stop_exit_codes)) = failure {
                 failed_attempt = true;
+                // A listed stop status means retrying the prompt cannot help
+                // (for example, missing prerequisites); it bypasses retries and
+                // if.fail, and a resume reruns this step.
+                if failure.stops(stop_exit_codes) {
+                    vars.set_quality_gate_feedback(None);
+                    return Err(CruiseError::QualityGateStopped {
+                        step: current_step.to_string(),
+                        command: crate::telemetry::stderr::sanitize(&failure.command).body,
+                        reason: failure.stop_reason(),
+                    });
+                }
                 let attempt = self_retry_spent.saturating_add(1);
                 let feedback = crate::quality_gate::format_feedback(
                     &failure,
