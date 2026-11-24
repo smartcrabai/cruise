@@ -83,7 +83,10 @@ after-pr:
 `tdd` and `research` share the ordered prelude `pr-ready` →
 `sync-base` → `resolve-conflict` → `push-after-sync` → `wait-ci` →
 `rerun-unacquired-ci` → `fix-ci-error`. Each caller passes its conflict prompt and task-specific scope
-into the shared resource, which owns the common CI repair prompt. `wait-ci`
+into the shared resource, which owns the common CI repair prompt. Before
+`push-after-sync` commits a resolution, the host refuses tracked edits outside
+the recorded conflict paths and added or removed untracked, non-ignored paths;
+ignored caches the resolver's checks write are not compared. `wait-ci`
 allows up to 60 minutes. For a confirmed current-head GitHub conflict, it exits promptly after validating the commit and rollup unless CI reports a failure. Failed CI retains its diagnostic and repair path, including waiting for running Actions suites. A stale PR head still observes the propagation grace period. If CI is still running at its deadline with no failed
 rollup, it reports pending without invoking repair. If a GitHub rollup is
 already failing, `wait-ci` keeps polling attached Actions suites until they

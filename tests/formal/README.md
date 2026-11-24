@@ -53,10 +53,12 @@ runtime-wide quiescence. Neither is a basis for daemon reuse or idle shutdown.
 Workflows that require agent-side commits cannot use this sandbox.
 
 `after_pr_host_git.qnt` models required-command failures, validated conflict
-publication, exact CI repair checks, one retry per head, a resumable CI repair
+publication (ignored-cache churn by the resolver is admitted; an added or
+removed untracked, non-ignored path blocks the commit), exact CI repair checks,
+one retry per head, a resumable CI repair
 `wait`, host reruns of failures made only of jobs no runner acquired (at most
 `MAX_RERUNS` per head, never for genuine or mixed failures, kept across
-resume), and read-only native merge admission. Quint 0.33.1 passes 26 witnesses and 1,000 seeded executions
+resume), and read-only native merge admission. Quint 0.33.1 passes 28 witnesses and 1,000 seeded executions
 of up to 13 transitions; Apalache 0.62.1 found no violation through 11
 transitions. The finite model does not prove the Rust implementation or provider APIs.
 
