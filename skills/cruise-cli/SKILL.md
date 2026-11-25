@@ -68,7 +68,7 @@ Run it inside a local Git checkout (`cruise manager` requires one); every subcom
 | `approve [--revision N] [--yes]` | Print the proposal (tasks, checks, contract) and approve it. Terminal: type `approve` unless `--yes`. No terminal: **both** `--yes` and `--revision N` are required, and N must match the current preview. Creates one active Goal; the daemon schedules children asynchronously. |
 | `pause <GOAL>` / `resume <GOAL>` | Pause or restore Goal-scoped scheduling. |
 | `resume <GOAL> <TASK>` | Continue the task's latest failed or suspended child in its existing worktree. |
-| `retry <GOAL> <TASK>` | Reserve a fresh attempt for an eligible failed/suspended child, or a completed child of a Goal blocked by a safely established integration conflict. |
+| `retry <GOAL> <TASK>` | Reserve a fresh attempt for an eligible failed/suspended child, or a completed child of a Goal blocked by a safely established integration conflict. For a Goal blocked by `interrupted Manager reservation no longer matches Goal tip`, reactivate it instead when that task's reservation has no published session; the reservation then starts once from the current tip. |
 | `retry <GOAL>` | Re-verify a blocked Goal whose tasks are all integrated, keeping prior evidence. Discards any unapproved corrective preview into the Goal's audit history so it can no longer be approved. Does not retry an uncertain publication. |
 | `answer <GOAL> <PROMPT> [TEXT]` | Answer a child's Ask prompt (TEXT or a terminal prompt; blank is rejected). |
 | `answer <GOAL> <PROMPT> --choice LABEL [--text TEXT]` | Answer a child's Option prompt outside a terminal with the exact label; `--text` only for text-input choices. On a terminal, Option prompts use the menu and `--choice` is rejected. |

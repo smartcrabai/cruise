@@ -1137,6 +1137,71 @@ fn validate_goal_tip<'a>(goal: &'a Goal, anchor: &Path) -> Result<&'a String> {
     Ok(tip)
 }
 
+const STALE_RESERVATION: &str = "interrupted Manager reservation no longer matches Goal tip";
+
+/// Whether nothing was published, claimed or recorded for a reservation, so no child ran.
+fn reservation_is_unpublished(
+    application: &CruiseApplication,
+    attempt: &TaskAttempt,
+) -> Result<bool> {
+    let directory = application
+        .managed_session_store()
+        .sessions_dir()
+        .join(&attempt.session_id);
+    let absent = match std::fs::symlink_metadata(directory) {
+        Ok(_) => false,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => return Err(error.into()),
+    };
+    Ok(absent
+        && attempt.launch_started == Some(false)
+        && !attempt.integrated
+        && attempt.result_sha.is_none()
+        && attempt.finalization_intent.is_none()
+        && attempt.integration_intent.is_none()
+        && !attempt.resume_pending
+        && !attempt.resume_starting
+        && application
+            .runtime()
+            .active_operation(&attempt.session_id)
+            .is_none())
+}
+
+/// The base is pinned at dispatch: an unpublished reservation that waited behind another
+/// child's integration follows the Goal tip. Any other mismatch stays blocked for review.
+fn repin_reservation(
+    application: &CruiseApplication,
+    cwd: &Path,
+    goal_id: &str,
+    attempt: &mut TaskAttempt,
+    tip: &str,
+) -> Result<()> {
+    if !reservation_is_unpublished(application, attempt)? {
+        return Err(CruiseError::Other(STALE_RESERVATION.into()));
+    }
+    manager::update_goal(cwd, goal_id, |current| {
+        if current.status != manager::GoalStatus::Active
+            || current.execution.integrated_tip.as_deref() != Some(tip)
+        {
+            return Err(CruiseError::Other("Manager dispatch state changed".into()));
+        }
+        let saved = current
+            .execution
+            .attempts
+            .iter_mut()
+            .find(|saved| {
+                saved.session_id == attempt.session_id
+                    && saved.launch_started == Some(false)
+                    && saved.base_sha == attempt.base_sha
+            })
+            .ok_or_else(|| CruiseError::Other("Manager reservation changed".into()))?;
+        tip.clone_into(&mut saved.base_sha);
+        Ok(())
+    })?;
+    tip.clone_into(&mut attempt.base_sha);
+    Ok(())
+}
+
 /// Reserve a previously undispatched task and claim its new child while holding
 /// the same gate as pause. The returned claim must be run or dropped by the
 /// daemon. An interrupted reservation is never silently launched again.
@@ -1196,7 +1261,7 @@ pub(crate) fn reserve_and_claim(
         .find(|task| task.id == task_id)
         .ok_or_else(|| CruiseError::Other("Manager task disappeared".into()))?;
     let plan = approved_child_plan(goal, task);
-    let attempt = recoverable.first().map_or_else(
+    let mut attempt = recoverable.first().map_or_else(
         || TaskAttempt {
             task_id: task_id.clone(),
             attempt: 1,
@@ -1212,10 +1277,9 @@ pub(crate) fn reserve_and_claim(
         },
         |attempt| (*attempt).clone(),
     );
+    // Only a reservation that provably never ran may follow the tip.
     if attempt.base_sha != *tip || attempt.integrated || attempt.result_sha.is_some() {
-        return Err(CruiseError::Other(
-            "interrupted Manager reservation no longer matches Goal tip".into(),
-        ));
+        repin_reservation(application, cwd, goal_id, &mut attempt, tip)?;
     }
     let child_owner = owner(goal, &attempt);
     let mut child = crate::session::SessionState::new(
@@ -2185,6 +2249,45 @@ fn select_retry_attempt<'a>(goal: &'a Goal, task_id: &str) -> Result<&'a TaskAtt
     Ok(*previous)
 }
 
+/// A Goal blocked only because this task's unpublished reservation outlived its base pin
+/// needs no new attempt: once active again, dispatch re-pins and launches that reservation.
+fn reactivate_stale_reservation(
+    application: &CruiseApplication,
+    cwd: &Path,
+    goal: &Goal,
+    task_id: &str,
+) -> Result<Option<Goal>> {
+    let mut pending = goal
+        .execution
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.launch_started == Some(false));
+    let (Some(reservation), None) = (pending.next(), pending.next()) else {
+        return Ok(None);
+    };
+    if goal.status != manager::GoalStatus::Blocked
+        || !goal
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.ends_with(STALE_RESERVATION))
+        || reservation.task_id != task_id
+        || !reservation_is_unpublished(application, reservation)?
+    {
+        return Ok(None);
+    }
+    manager::update_goal(cwd, &goal.id, |current| {
+        if current.status != goal.status
+            || current.reason != goal.reason
+            || current.execution.attempts.len() != goal.execution.attempts.len()
+        {
+            return Err(CruiseError::Other("Goal changed during retry".into()));
+        }
+        current.status = manager::GoalStatus::Active;
+        current.reason = None;
+        Ok(Some(current.clone()))
+    })
+}
+
 /// Explicitly reserve a fresh attempt without changing or deleting prior evidence.
 /// The coordinator gate serializes this decision with dispatch and integration.
 pub(crate) fn retry_task(
@@ -2216,6 +2319,9 @@ pub(crate) fn retry_task(
     let mut validation = goal.clone();
     validation.status = manager::GoalStatus::Active;
     ready_tasks(&validation, 1)?;
+    if let Some(goal) = reactivate_stale_reservation(application, cwd, goal, task_id)? {
+        return Ok(goal);
+    }
     let previous = select_retry_attempt(goal, task_id)?;
     let child = application.read_session(&previous.session_id)?;
     if child.managed_child.as_ref() != Some(&owner(goal, previous))
