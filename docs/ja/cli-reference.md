@@ -380,10 +380,15 @@ cruise manager resume <GOAL> [TASK]
 cruise manager retry <GOAL> [TASK]
 cruise manager answer <GOAL> <PROMPT> [TEXT | --choice LABEL [--text TEXT]]
 cruise manager corrective <GOAL> <TASK> [--instructions TEXT]
+cruise manager corrective <GOAL> <TASK> --resume [--instructions TEXT]
+cruise manager corrective <GOAL> <TASK> --evidence --criterion ID... --path FILE...
+cruise manager corrective <GOAL> --amend FILE
 cruise manager approve-corrective <GOAL> [--revision N] [--yes]
 ```
 
 試験的な機能です。ローカルの Git チェックアウト内で実行し、すべてのサブコマンドが daemon client です。他のサブコマンドに渡す Goal、タスク、プロンプトの ID は `cruise manager status` で確認でき、スクリプトでは `--json` を付けます。`say` と `propose` はターンの完了を待ち、完了しなければ 0 以外で終了します。`--no-wait` はターン ID を表示して戻ります。`approve` と `approve-corrective` は承認対象を表示します。端末がない場合は `--yes` と `--revision N` の両方が必要で、一致しなくなったリビジョンは拒否されます。`resume GOAL TASK` は最新の失敗または中断した試行をその worktree で続行し、`retry GOAL TASK` は新しい試行を予約し、`retry GOAL` はタスクが統合済みのブロック中ゴールを再検証します。未承認の修正案は破棄され、ゴールの監査履歴に保存されます。破棄された修正案は承認できません。`answer` は Ask プロンプトに TEXT を受け取ります。Option プロンプトは端末ではメニューを使い、それ以外では `--choice`（テキスト入力型の選択肢には `--text` も）が必要です。条件、記録、WebUI については[試験的な Manager の記録](sessions.md#試験的な-manager-の記録)を参照してください。
+
+`corrective GOAL TASK` は検証失敗後に追加タスクをプレビューします。`--amend FILE` は基準またはタスク指示の文言の修正を、`TASK --resume` は承認済みの指示を付けた失敗した試行のその場での再開を、`TASK --evidence` は指定した基準の承認済みチェックがすべて Goal tip で成功した場合の失敗タスクの解決をプレビューします。どのプレビューも `approve-corrective` で承認し、確認時の Goal tip と契約に結び付けられます。
 
 <a id="cruise-diff"></a>
 ## `cruise diff`

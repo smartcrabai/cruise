@@ -4,6 +4,7 @@
 //! An uncertain create must be reconciled with `lookup`, never blindly retried.
 
 use crate::forge::{ForgeContext, ForgeKind};
+use crate::manager::GoalStatus;
 use command_group::CommandGroup;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -60,14 +61,16 @@ fn run(
     run_inner(dir, program, args, cancel, None)
 }
 
+/// Run an external effect only while the Goal is durably in `status`.
 pub(crate) fn run_effect(
     dir: &Path,
     program: &str,
     args: &[String],
     cancel: &crate::cancellation::CancellationToken,
     goal_id: &str,
+    status: &GoalStatus,
 ) -> Result<String, String> {
-    run_inner(dir, program, args, cancel, Some(goal_id))
+    run_inner(dir, program, args, cancel, Some((goal_id, status)))
 }
 
 fn run_inner(
@@ -75,14 +78,15 @@ fn run_inner(
     program: &str,
     args: &[String],
     cancel: &crate::cancellation::CancellationToken,
-    goal_id: Option<&str>,
+    gate: Option<(&str, &GoalStatus)>,
 ) -> Result<String, String> {
     if cancel.is_cancelled() {
         return Err(format!("{program} cancelled before start"));
     }
-    let gate = goal_id
-        .map(|id| {
-            crate::manager_publication::effect_guard(dir, id, cancel).map_err(|e| e.to_string())
+    let gate = gate
+        .map(|(id, status)| {
+            crate::manager_publication::effect_guard(dir, id, cancel, status)
+                .map_err(|e| e.to_string())
         })
         .transpose()?;
     let mut child = Command::new(program)
@@ -403,6 +407,7 @@ pub(crate) fn push(
         ],
         cancel,
         goal_id,
+        &GoalStatus::Verifying,
     )?;
     Ok(())
 }
@@ -467,6 +472,6 @@ pub(crate) fn create(
             ],
         ),
     };
-    run_effect(dir, program, &args, cancel, goal_id)?;
+    run_effect(dir, program, &args, cancel, goal_id, &GoalStatus::Verifying)?;
     Ok(())
 }

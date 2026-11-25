@@ -14,7 +14,8 @@ use crate::daemon::api::manager::{
     Action, dispatch_action, enriched_snapshot, startup_action_error,
 };
 use crate::error::Result;
-use crate::manager::{self, GoalStatus, Task};
+use crate::manager::{self, Correction, GoalStatus, Task};
+use crate::manager_coordinator::corrections::CorrectionRequest;
 use crate::step::option::OptionResult;
 
 use super::handlers::{Fields, Form as FormPairs};
@@ -233,18 +234,34 @@ fn goal_controls(value: &mut Value) -> Result<()> {
     value["execution"]["can_retry_verification"] = json!(can_retry_verification);
     value["execution"]["can_preview_corrective"] =
         json!(crate::manager_publication::corrective_tip(&goal).is_ok());
+    if let Some(preview) = &execution.corrective_preview {
+        let (title, summary) = corrective_summary(&preview.correction);
+        value["execution"]["corrective_preview"]["title"] = json!(title);
+        value["execution"]["corrective_preview"]["summary"] = json!(summary);
+        // The daemon decides on approval; only a task preview has a state to pre-check.
+        value["execution"]["can_approve_corrective"] = json!(
+            !matches!(preview.correction, Correction::Task(_))
+                || crate::manager_publication::corrective_tip(&goal).is_ok()
+        );
+    }
     if let Some(attempts) = value["execution"]["attempts"].as_array_mut() {
         for (attempt, data) in execution.attempts.iter().zip(attempts) {
-            let current = !execution.attempts.iter().any(|other| {
-                other.task_id == attempt.task_id
-                    && (other.attempt > attempt.attempt
-                        || other.integrated
-                        || other.integration_intent.is_some())
-            });
+            let current = !goal.task_resolved(&attempt.task_id)
+                && !execution.attempts.iter().any(|other| {
+                    other.task_id == attempt.task_id
+                        && (other.attempt > attempt.attempt
+                            || other.integrated
+                            || other.integration_intent.is_some())
+                });
             let phase = data["child_state"]["phase"].as_str();
             let interrupted = matches!(phase, Some("Failed" | "Suspended"));
             let ready = current && !attempt.resume_pending;
-            let can_resume = ready && active && interrupted && !attempt.resume_starting;
+            // A correction that was approved but not started needs a new approval, not a resume.
+            let can_resume = ready
+                && active
+                && interrupted
+                && !attempt.resume_starting
+                && attempt.correction_pending.is_none();
             let can_retry = ready
                 && ((active
                     && !attempt.resume_starting
@@ -264,6 +281,47 @@ fn goal_controls(value: &mut Value) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Title and body of a corrective preview for the review panel: only reviewed data.
+fn corrective_summary(correction: &Correction) -> (String, String) {
+    match correction {
+        Correction::Task(task) => (task.id.clone(), task.instructions.clone()),
+        Correction::Amendment(edits) => {
+            let ids: Vec<&str> = edits.iter().map(|edit| edit.target.label().1).collect();
+            let passages: Vec<String> = edits
+                .iter()
+                .map(|edit| {
+                    let (kind, id) = edit.target.label();
+                    format!("{kind} {id}\n- {}\n+ {}", edit.replace, edit.with)
+                })
+                .collect();
+            (ids.join(", "), passages.join("\n\n"))
+        }
+        Correction::Resume(correction) => (
+            format!(
+                "{} #{} @ {}",
+                correction.task_id, correction.attempt, correction.step
+            ),
+            correction.instructions.clone(),
+        ),
+        Correction::Evidence(request) => {
+            let blobs: Vec<String> = request
+                .blobs
+                .iter()
+                .map(|blob| format!("{} {}", blob.path, blob.blob))
+                .collect();
+            (
+                format!("{} #{}", request.task_id, request.attempt),
+                format!(
+                    "{} -> {}\n{}",
+                    request.criteria.join(", "),
+                    request.checks.join(", "),
+                    blobs.join("\n")
+                ),
+            )
+        }
+    }
 }
 
 fn region_partial(state: &WebState, key: &str, cwd: &Path) -> Result<String> {
@@ -397,11 +455,11 @@ fn parse_action(name: &str, fields: &Fields) -> std::result::Result<Action, Stri
         "preview-corrective" => Action::PreviewCorrective {
             goal_id: goal_id()?,
             expected_tip: field("expected_tip")?,
-            task: Task {
+            request: CorrectionRequest::Task(Task {
                 id: task_id()?,
                 instructions: field("instructions")?,
                 dependencies: Vec::new(),
-            },
+            }),
         },
         "approve-corrective" => Action::ApproveCorrective {
             goal_id: goal_id()?,

@@ -16,6 +16,8 @@ use crate::error::{CruiseError, Result};
 use crate::manager::{self, Goal, TaskAttempt};
 use crate::session::ManagedChildOwner;
 
+pub(crate) mod corrections;
+
 // The durable pause and the corresponding runtime signal form one control
 // operation. Do not let a concurrent resume overtake that signal.
 pub(crate) static CONTROL: Mutex<()> = Mutex::new(());
@@ -49,7 +51,7 @@ fn same_canonical_path(left: &Path, right: &Path) -> Result<bool> {
     Ok(left.canonicalize()? == right.canonicalize()?)
 }
 
-fn clear_failed_child_reason(goal: &mut Goal, task_id: &str) {
+pub(crate) fn clear_failed_child_reason(goal: &mut Goal, task_id: &str) {
     let prefix = format!("Managed child failure for task {task_id} ");
     if goal
         .reason
@@ -209,23 +211,35 @@ fn dispatch_pending_resumes(
         if stop.is_cancelled() || claim.token().is_cancelled() {
             continue;
         }
-        let admitted =
-            manager::update_goal(&cwd, &goal_id, |goal| {
-                if goal.status != manager::GoalStatus::Active {
-                    return Ok(false);
-                }
-                let Some(attempt) = goal.execution.attempts.iter_mut().find(|attempt| {
+        // A correction was approved for one exact state; any other state is not launched.
+        let changed =
+            corrections::launch_mismatch(application, &cwd, &goal_id, &task_id, attempt_number);
+        let admitted = manager::update_goal(&cwd, &goal_id, |goal| {
+            if goal.status != manager::GoalStatus::Active {
+                return Ok(false);
+            }
+            let Some(attempt) =
+                goal.execution.attempts.iter_mut().find(|attempt| {
                     attempt.task_id == task_id && attempt.attempt == attempt_number
-                }) else {
-                    return Ok(false);
-                };
-                if !attempt.resume_pending {
-                    return Ok(false);
-                }
-                attempt.resume_pending = false;
-                attempt.resume_starting = true;
-                Ok(true)
-            });
+                })
+            else {
+                return Ok(false);
+            };
+            if !attempt.resume_pending {
+                return Ok(false);
+            }
+            attempt.resume_pending = false;
+            if let Some(reason) = &changed {
+                // The unstarted correction stays recorded until it is approved again.
+                eprintln!("warning: Manager correction for {task_id} was not started: {reason}");
+                return Ok(false);
+            }
+            attempt.resume_starting = true;
+            attempt
+                .corrections
+                .extend(attempt.correction_pending.take());
+            Ok(true)
+        });
         match admitted {
             Ok(true) => {}
             Ok(false) => continue,
@@ -281,9 +295,20 @@ fn record_failed_child(
     attempt: &TaskAttempt,
     failure: &str,
 ) -> Result<()> {
+    let next = if attempt.correction_pending.is_some() && !attempt.resume_pending {
+        format!(
+            "An approved correction was not started because the reviewed state changed; preview and approve it again with `cruise manager corrective {} {} --resume`",
+            goal.id, attempt.task_id
+        )
+    } else {
+        format!(
+            "`cruise manager resume {} {}` resumes this child",
+            goal.id, attempt.task_id
+        )
+    };
     let reason = format!(
-        "Managed child failure for task {} (session {}): {failure}. Preserve its worktree and logs. Next action: `cruise manager resume {} {}` resumes this child; `cruise manager retry {} {}` starts a fresh attempt.",
-        attempt.task_id, attempt.session_id, goal.id, attempt.task_id, goal.id, attempt.task_id,
+        "Managed child failure for task {} (session {}): {failure}. Preserve its worktree and logs. Next action: {next}; `cruise manager retry {} {}` starts a fresh attempt.",
+        attempt.task_id, attempt.session_id, goal.id, attempt.task_id,
     );
     if goal.reason.as_deref() == Some(reason.as_str()) {
         return Ok(());
@@ -363,7 +388,7 @@ async fn inspect_goal_children(
         {
             continue;
         }
-        if attempt.integrated {
+        if attempt.integrated || goal.task_resolved(&attempt.task_id) {
             continue;
         }
         if attempt.launch_started == Some(false) {
@@ -454,20 +479,39 @@ fn dispatch_ready_goal(
     children: &mut tokio::task::JoinSet<()>,
     publications: &mut tokio::task::JoinSet<()>,
 ) {
+    // An approved evidence run takes the Goal's verification lease like a publication.
+    if goal
+        .execution
+        .evidence_runs
+        .iter()
+        .any(|run| run.outcome.is_none())
+    {
+        schedule_publication(
+            publications,
+            anchor,
+            &goal.id,
+            stop,
+            crate::manager_publication::run_evidence,
+        );
+    }
     // Re-read after integration: the snapshot above predates any
     // child finalization performed during this iteration.
     if let Ok(current) = manager::snapshot(anchor)
         && let Some(current_goal) = current.goals.iter().find(|g| g.id == goal.id)
         && current_goal.status == manager::GoalStatus::Active
-        && current_goal.proposal.tasks.iter().all(|task| {
-            current_goal
-                .execution
-                .attempts
-                .iter()
-                .any(|attempt| attempt.task_id == task.id && attempt.integrated)
-        })
+        && current_goal
+            .proposal
+            .tasks
+            .iter()
+            .all(|task| current_goal.task_done(&task.id))
     {
-        schedule_publication(publications, anchor, &goal.id, stop);
+        schedule_publication(
+            publications,
+            anchor,
+            &goal.id,
+            stop,
+            crate::manager_publication::reconcile,
+        );
         return;
     }
     match reserve_and_claim(application, anchor, &goal.id) {
@@ -534,7 +578,13 @@ async fn schedule_inventory(
                     ) {
                         observing = true;
                         if let Some(anchor) = goal.execution.anchor.clone() {
-                            schedule_publication(publications, &anchor, &goal.id, stop);
+                            schedule_publication(
+                                publications,
+                                &anchor,
+                                &goal.id,
+                                stop,
+                                crate::manager_publication::reconcile,
+                            );
                         }
                         continue;
                     }
@@ -558,7 +608,7 @@ async fn schedule_inventory(
                                 &anchor,
                                 &goal.id,
                                 &attempt.task_id,
-                                true,
+                                &Resume::Recovery,
                             )
                         {
                             eprintln!(
@@ -687,6 +737,7 @@ fn schedule_publication(
     anchor: &Path,
     goal_id: &str,
     stop: &crate::cancellation::CancellationToken,
+    work: fn(&Path, &str, &PublicationLease) -> Result<()>,
 ) {
     let lease = match begin_publication(anchor, goal_id, stop) {
         Ok(lease) => lease,
@@ -699,8 +750,8 @@ fn schedule_publication(
     let anchor = anchor.to_owned();
     let goal_id = goal_id.to_owned();
     workers.spawn_blocking(move || {
-        if let Err(error) = crate::manager_publication::reconcile(&anchor, &goal_id, &lease) {
-            eprintln!("warning: Manager publication reconciliation failed for {goal_id}: {error}");
+        if let Err(error) = work(&anchor, &goal_id, &lease) {
+            eprintln!("warning: Manager verification work failed for {goal_id}: {error}");
         }
     });
 }
@@ -771,12 +822,10 @@ pub(crate) fn ready_tasks(goal: &Goal, capacity: usize) -> Result<Vec<String>> {
         if goal.execution.attempts.iter().any(|a| a.task_id == task.id) {
             continue;
         }
-        let dependencies_integrated = task.dependencies.iter().all(|dependency| {
-            goal.execution
-                .attempts
-                .iter()
-                .any(|a| a.task_id == *dependency && a.integrated)
-        });
+        let dependencies_integrated = task
+            .dependencies
+            .iter()
+            .all(|dependency| goal.task_done(dependency));
         if dependencies_integrated {
             ready.push(task.id.clone());
             if ready.len() == capacity {
@@ -787,20 +836,82 @@ pub(crate) fn ready_tasks(goal: &Goal, capacity: usize) -> Result<Vec<String>> {
     Ok(ready)
 }
 
-fn approved_child_plan(goal: &Goal, task: &manager::Task) -> String {
+const CORRECTION_HEADING: &str = "\n# Approved correction ";
+
+/// Plan of one attempt, derived only from the Goal record: the contract as amended when the
+/// attempt was reserved, then every correction approved for exactly this attempt. A
+/// correction also states the texts amended since, so the plan only ever grows.
+fn child_plan(goal: &Goal, attempt: &TaskAttempt) -> Result<String> {
+    let mut contract = attempt.contract_revision;
     let mut plan = format!(
         "# Goal\n\n{}\n\n# Task\n\n{}\n\n# Acceptance criteria\n",
-        goal.proposal.objective, task.instructions
+        goal.proposal.objective,
+        goal.task_text(&attempt.task_id, contract)?
     );
     for criterion in &goal.proposal.criteria {
-        let _ = write!(plan, "\n- {}: {}", criterion.id, criterion.description);
+        let description = goal.criterion_text(&criterion.id, contract)?;
+        let _ = write!(plan, "\n- {}: {description}", criterion.id);
     }
     plan.push_str("\n\n# Exclusions\n");
     for exclusion in &goal.proposal.exclusions {
         let _ = write!(plan, "\n- {exclusion}");
     }
     plan.push('\n');
-    plan
+    for revision in &attempt.corrections {
+        let (approved, instructions) = match goal.approved(*revision) {
+            Some(approved) => match &approved.correction {
+                manager::Correction::Resume(correction)
+                    if correction.session_id == attempt.session_id =>
+                {
+                    (approved, correction.instructions.trim())
+                }
+                _ => return Err(unapproved_correction()),
+            },
+            None => return Err(unapproved_correction()),
+        };
+        let _ = write!(plan, "{CORRECTION_HEADING}{revision}\n\n{instructions}\n");
+        let amended = goal.amended_between(contract, approved.contract_revision)?;
+        if !amended.is_empty() {
+            plan.push_str(
+                "\nThe owner amended the contract. These texts replace the ones above:\n",
+            );
+            for (target, text) in amended {
+                let (kind, id) = target.label();
+                let _ = write!(plan, "\n- {kind} {id}: {text}");
+            }
+            plan.push('\n');
+        }
+        contract = contract.max(approved.contract_revision);
+    }
+    Ok(plan)
+}
+
+fn unapproved_correction() -> CruiseError {
+    CruiseError::Other("Manager attempt names a correction that was not approved for it".into())
+}
+
+/// The plan file is a copy of `expected`. Refresh it only when it is that plan before a
+/// newer approved correction; any other content was not written by Manager.
+fn sync_child_plan(
+    application: &CruiseApplication,
+    child: &crate::session::SessionState,
+    expected: &str,
+) -> Result<()> {
+    let current = application.session_plan(&child.id)?;
+    if current == expected {
+        return Ok(());
+    }
+    if !expected
+        .strip_prefix(current.as_str())
+        .is_some_and(|newer| newer.starts_with(CORRECTION_HEADING))
+    {
+        return Err(CruiseError::Other(
+            "Manager child plan differs from the approved contract".into(),
+        ));
+    }
+    let sessions = application.managed_session_store().sessions_dir();
+    crate::planning::write_plan_atomically(&child.plan_path(&sessions), expected.as_bytes())?;
+    Ok(())
 }
 
 /// Validate the durable owner and approved inputs again after acquiring the
@@ -843,12 +954,7 @@ pub(crate) fn validate_claimed_child(
                 && attempt.session_id == child.id
         })
         .ok_or_else(|| CruiseError::Other("Manager attempt is missing".into()))?;
-    let task = goal
-        .proposal
-        .tasks
-        .iter()
-        .find(|task| task.id == attempt.task_id)
-        .ok_or_else(|| CruiseError::Other("Manager task is missing".into()))?;
+    let expected_plan = child_plan(goal, attempt)?;
     let contract = goal
         .proposal
         .contract
@@ -879,13 +985,12 @@ pub(crate) fn validate_claimed_child(
         || actual_config.force_exec
         || !actual_config.after_pr.is_empty()
         || serde_json::to_value(&actual_config)? != serde_json::to_value(&contract.workflow)?
-        || application.session_plan(&child.id)? != approved_child_plan(goal, task)
     {
         return Err(CruiseError::Other(
             "Manager child settings differ from the approved contract".into(),
         ));
     }
-    Ok(())
+    sync_child_plan(application, child, &expected_plan)
 }
 
 fn check_orphan_children(application: &CruiseApplication, ids: &HashSet<&String>) -> Result<()> {
@@ -1167,14 +1272,16 @@ fn reservation_is_unpublished(
             .is_none())
 }
 
-/// The base is pinned at dispatch: an unpublished reservation that waited behind another
-/// child's integration follows the Goal tip. Any other mismatch stays blocked for review.
+/// The base and contract are pinned at dispatch: an unpublished reservation that waited
+/// behind another child's integration or a contract amendment follows the Goal. Any other
+/// mismatch stays blocked for review.
 fn repin_reservation(
     application: &CruiseApplication,
     cwd: &Path,
     goal_id: &str,
     attempt: &mut TaskAttempt,
     tip: &str,
+    contract_revision: u64,
 ) -> Result<()> {
     if !reservation_is_unpublished(application, attempt)? {
         return Err(CruiseError::Other(STALE_RESERVATION.into()));
@@ -1196,10 +1303,32 @@ fn repin_reservation(
             })
             .ok_or_else(|| CruiseError::Other("Manager reservation changed".into()))?;
         tip.clone_into(&mut saved.base_sha);
+        saved.contract_revision = contract_revision;
         Ok(())
     })?;
     tip.clone_into(&mut attempt.base_sha);
+    attempt.contract_revision = contract_revision;
     Ok(())
+}
+
+/// A saved attempt whose child has not been launched, planned with the current contract.
+fn reservation(goal: &Goal, task_id: &str, number: u32, tip: &str) -> TaskAttempt {
+    TaskAttempt {
+        task_id: task_id.to_owned(),
+        attempt: number,
+        session_id: crate::session::SessionManager::new_session_id(),
+        base_sha: tip.to_owned(),
+        launch_started: Some(false),
+        resume_pending: false,
+        resume_starting: false,
+        result_sha: None,
+        finalization_intent: None,
+        integrated: false,
+        integration_intent: None,
+        contract_revision: goal.contract_revision(),
+        corrections: Vec::new(),
+        correction_pending: None,
+    }
 }
 
 /// Reserve a previously undispatched task and claim its new child while holding
@@ -1254,39 +1383,34 @@ pub(crate) fn reserve_and_claim(
     let anchor = &contract.anchor;
     validate_checkout(anchor, contract, &snapshot.repository)?;
     let tip = validate_goal_tip(goal, anchor)?;
-    let task = goal
-        .proposal
-        .tasks
-        .iter()
-        .find(|task| task.id == task_id)
-        .ok_or_else(|| CruiseError::Other("Manager task disappeared".into()))?;
-    let plan = approved_child_plan(goal, task);
+    let contract_revision = goal.contract_revision();
     let mut attempt = recoverable.first().map_or_else(
-        || TaskAttempt {
-            task_id: task_id.clone(),
-            attempt: 1,
-            session_id: crate::session::SessionManager::new_session_id(),
-            base_sha: tip.clone(),
-            launch_started: Some(false),
-            resume_pending: false,
-            resume_starting: false,
-            result_sha: None,
-            finalization_intent: None,
-            integrated: false,
-            integration_intent: None,
-        },
+        || reservation(goal, &task_id, 1, tip),
         |attempt| (*attempt).clone(),
     );
-    // Only a reservation that provably never ran may follow the tip.
-    if attempt.base_sha != *tip || attempt.integrated || attempt.result_sha.is_some() {
-        repin_reservation(application, cwd, goal_id, &mut attempt, tip)?;
+    // Only a reservation that provably never ran may follow the tip and the contract.
+    if attempt.base_sha != *tip
+        || attempt.integrated
+        || attempt.result_sha.is_some()
+        || (attempt.contract_revision != contract_revision
+            && reservation_is_unpublished(application, &attempt)?)
+    {
+        repin_reservation(
+            application,
+            cwd,
+            goal_id,
+            &mut attempt,
+            tip,
+            contract_revision,
+        )?;
     }
+    let plan = child_plan(goal, &attempt)?;
     let child_owner = owner(goal, &attempt);
     let mut child = crate::session::SessionState::new(
         attempt.session_id.clone(),
         anchor.clone(),
         crate::session_config::SessionConfigRef::inline_snapshot(),
-        task.instructions.clone(),
+        goal.task_text(&task_id, attempt.contract_revision)?,
     );
     child.managed_child = Some(child_owner.clone());
     child.mark_input_as_plan();
@@ -1850,7 +1974,7 @@ pub(crate) fn resume_task(
     goal_id: &str,
     task_id: &str,
 ) -> Result<Goal> {
-    resume_task_inner(application, cwd, goal_id, task_id, false)
+    resume_task_inner(application, cwd, goal_id, task_id, &Resume::Requested)
 }
 
 fn validate_resume_capacity(
@@ -1985,6 +2109,15 @@ fn validate_resume_child(
     Ok(child)
 }
 
+/// How a resume was authorized. An approved correction is delivered only by the resume
+/// that its own approval armed.
+pub(crate) enum Resume<'a> {
+    Requested,
+    /// Re-admit a durable pending request after a restart or a Goal resume.
+    Recovery,
+    Corrected(&'a manager::CorrectivePreview),
+}
+
 fn validate_resume_attempt(attempt: &TaskAttempt, recovery: bool) -> Result<()> {
     if attempt.resume_starting {
         return Err(CruiseError::Other(
@@ -2011,23 +2144,14 @@ fn validate_resume_attempt(attempt: &TaskAttempt, recovery: bool) -> Result<()> 
     Ok(())
 }
 
-fn resume_task_inner(
+/// The task's latest attempt and its child, when every resume precondition holds.
+fn resumable_attempt<'a>(
     application: &CruiseApplication,
-    cwd: &Path,
-    goal_id: &str,
+    goal: &'a Goal,
+    repository: &Path,
     task_id: &str,
     recovery: bool,
-) -> Result<Goal> {
-    let _guard = CONTROL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let inventory = manager::snapshots()?;
-    let snapshot = manager::snapshot(cwd)?;
-    let goal = snapshot
-        .goals
-        .iter()
-        .find(|goal| goal.id == goal_id)
-        .ok_or_else(|| CruiseError::Other("unknown Manager goal for this repository".into()))?;
+) -> Result<(&'a TaskAttempt, crate::session::SessionState)> {
     validate_execution_contract(goal)?;
     if goal.status != manager::GoalStatus::Active {
         return Err(CruiseError::Other(
@@ -2041,18 +2165,21 @@ fn resume_task_inner(
         .iter()
         .find(|task| task.id == task_id)
         .ok_or_else(|| CruiseError::Other("unknown Manager task".into()))?;
-    if !task.dependencies.iter().all(|dependency| {
-        goal.execution
-            .attempts
-            .iter()
-            .any(|attempt| attempt.task_id == *dependency && attempt.integrated)
-    }) || goal.execution.attempts.iter().any(|attempt| {
-        attempt.task_id == task_id && (attempt.integrated || attempt.integration_intent.is_some())
-    }) {
+    if !task
+        .dependencies
+        .iter()
+        .all(|dependency| goal.task_done(dependency))
+        || goal.task_resolved(task_id)
+        || goal.execution.attempts.iter().any(|attempt| {
+            attempt.task_id == task_id
+                && (attempt.integrated || attempt.integration_intent.is_some())
+        })
+    {
         return Err(CruiseError::Other(
             "task dependencies or prior integration are unsafe".into(),
         ));
     }
+    corrections::no_evidence_running(goal, task_id)?;
     let attempt = goal
         .execution
         .attempts
@@ -2062,7 +2189,53 @@ fn resume_task_inner(
         .ok_or_else(|| CruiseError::Other("task has no previous attempt".into()))?;
     validate_resume_attempt(attempt, recovery)?;
     let child = validate_resume_child(application, goal, attempt)?;
-    validate_resume_worktree(application, goal, attempt, &child, &snapshot.repository)?;
+    validate_resume_worktree(application, goal, attempt, &child, repository)?;
+    Ok((attempt, child))
+}
+
+fn resume_task_inner(
+    application: &CruiseApplication,
+    cwd: &Path,
+    goal_id: &str,
+    task_id: &str,
+    resume: &Resume<'_>,
+) -> Result<Goal> {
+    let _guard = CONTROL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    admit_resume(application, cwd, goal_id, task_id, resume)
+}
+
+/// Validate, claim and durably queue one resume. The caller holds `CONTROL`.
+fn admit_resume(
+    application: &CruiseApplication,
+    cwd: &Path,
+    goal_id: &str,
+    task_id: &str,
+    resume: &Resume<'_>,
+) -> Result<Goal> {
+    let inventory = manager::snapshots()?;
+    let snapshot = manager::snapshot(cwd)?;
+    let goal = snapshot
+        .goals
+        .iter()
+        .find(|goal| goal.id == goal_id)
+        .ok_or_else(|| CruiseError::Other("unknown Manager goal for this repository".into()))?;
+    let recovery = matches!(resume, Resume::Recovery);
+    let (attempt, child) =
+        resumable_attempt(application, goal, &snapshot.repository, task_id, recovery)?;
+    match resume {
+        Resume::Corrected(preview) => {
+            corrections::verify_reviewed_attempt(goal, attempt, &child, preview)?;
+        }
+        // A plain resume never delivers a correction the dispatcher refused to start.
+        Resume::Requested if attempt.correction_pending.is_some() => {
+            return Err(CruiseError::Other(
+                "an approved correction was not started; approve it again or retry the task".into(),
+            ));
+        }
+        Resume::Requested | Resume::Recovery => {}
+    }
     validate_resume_capacity(application, &inventory)?;
     let mut resumes = RESUMES
         .lock()
@@ -2077,23 +2250,39 @@ fn resume_task_inner(
         &owner(goal, attempt),
         OperationKind::Run,
     )?;
-    if !recovery {
-        manager::update_goal(cwd, goal_id, |saved_goal| {
-            let saved = saved_goal
-                .execution
-                .attempts
-                .iter_mut()
-                .find(|saved| {
-                    saved.task_id == task_id
-                        && saved.attempt == attempt.attempt
-                        && saved.session_id == child.id
-                })
-                .ok_or_else(|| CruiseError::Other("child attempt changed".into()))?;
-            saved.resume_pending = true;
-            clear_failed_child_reason(saved_goal, task_id);
-            Ok(())
-        })?;
-    }
+    let arm = |saved_goal: &mut Goal, correction: Option<u64>| {
+        let saved = saved_goal
+            .execution
+            .attempts
+            .iter_mut()
+            .find(|saved| {
+                saved.task_id == task_id
+                    && saved.attempt == attempt.attempt
+                    && saved.session_id == child.id
+            })
+            .ok_or_else(|| CruiseError::Other("child attempt changed".into()))?;
+        saved.resume_pending = true;
+        if correction.is_some() {
+            saved.correction_pending = correction;
+        }
+        clear_failed_child_reason(saved_goal, task_id);
+        Ok(())
+    };
+    let goal = match resume {
+        Resume::Recovery => goal.clone(),
+        Resume::Requested => {
+            manager::update_goal(cwd, goal_id, |saved_goal| arm(saved_goal, None))?;
+            goal.clone()
+        }
+        // The approval and the armed resume are one write: neither exists alone.
+        Resume::Corrected(preview) => manager::approve_correction(
+            cwd,
+            goal_id,
+            &preview.id,
+            preview.revision,
+            |saved_goal, preview| arm(saved_goal, Some(preview.revision)),
+        )?,
+    };
     resumes.1.push((
         cwd.to_path_buf(),
         goal_id.to_owned(),
@@ -2102,7 +2291,7 @@ fn resume_task_inner(
         claim,
     ));
     wake();
-    Ok(goal.clone())
+    Ok(goal)
 }
 
 fn validate_retry_phase(
@@ -2192,12 +2381,7 @@ fn select_retry_attempt<'a>(goal: &'a Goal, task_id: &str) -> Result<&'a TaskAtt
         .iter()
         .find(|t| t.id == task_id)
         .ok_or_else(|| CruiseError::Other("unknown Manager task".into()))?;
-    if !task.dependencies.iter().all(|dep| {
-        goal.execution
-            .attempts
-            .iter()
-            .any(|a| a.task_id == *dep && a.integrated)
-    }) {
+    if !task.dependencies.iter().all(|dep| goal.task_done(dep)) {
         return Err(CruiseError::Other(
             "task dependencies are not integrated".into(),
         ));
@@ -2218,6 +2402,12 @@ fn select_retry_attempt<'a>(goal: &'a Goal, task_id: &str) -> Result<&'a TaskAtt
         .iter()
         .filter(|a| a.task_id == task_id)
         .collect();
+    if goal.task_resolved(task_id) {
+        return Err(CruiseError::Other(
+            "task is already resolved by evidence".into(),
+        ));
+    }
+    corrections::no_evidence_running(goal, task_id)?;
     if attempts.iter().any(|a| a.integrated) {
         return Err(CruiseError::Other("task is already integrated".into()));
     }
@@ -2360,19 +2550,7 @@ pub(crate) fn retry_task(
         .attempt
         .checked_add(1)
         .ok_or_else(|| CruiseError::Other("attempt number exhausted".into()))?;
-    let attempt = TaskAttempt {
-        task_id: task_id.to_owned(),
-        attempt: number,
-        session_id: crate::session::SessionManager::new_session_id(),
-        base_sha: tip.clone(),
-        launch_started: Some(false),
-        resume_pending: false,
-        resume_starting: false,
-        result_sha: None,
-        finalization_intent: None,
-        integrated: false,
-        integration_intent: None,
-    };
+    let attempt = reservation(goal, task_id, number, tip);
     manager::update_goal(cwd, goal_id, |current| {
         if current.status != goal.status
             || current.execution.integrated_tip.as_ref() != Some(tip)

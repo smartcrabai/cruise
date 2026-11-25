@@ -221,17 +221,9 @@ pub enum ManagerCommand {
         #[arg(long = "text", requires = "choice", value_name = "TEXT")]
         option_text: Option<String>,
     },
-    /// Preview a corrective task without authorizing it.
-    Corrective {
-        /// Goal ID from `cruise manager status`.
-        goal: String,
-        /// New task ID for the corrective work.
-        task: String,
-        /// Corrective instructions. Read from the terminal or piped stdin when omitted.
-        #[arg(long, value_name = "TEXT")]
-        instructions: Option<String>,
-    },
-    /// Review and approve a corrective task preview.
+    /// Preview a correction to an approved goal without authorizing it.
+    Corrective(ManagerCorrectiveArgs),
+    /// Review and approve a corrective preview.
     ApproveCorrective {
         /// Goal ID from `cruise manager status`.
         goal: String,
@@ -248,6 +240,33 @@ pub struct ManagerApprovalArgs {
     /// Explicitly approve without prompting. Requires --revision outside a terminal.
     #[arg(long)]
     pub yes: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct ManagerCorrectiveArgs {
+    /// Goal ID from `cruise manager status`.
+    pub goal: String,
+    /// New task ID for corrective work, or the existing task for --resume and --evidence.
+    #[arg(required_unless_present = "amend")]
+    pub task: Option<String>,
+    /// Instructions for the task or for --resume. Read from the terminal or piped stdin when omitted.
+    #[arg(long, value_name = "TEXT")]
+    pub instructions: Option<String>,
+    /// Amend criterion or task wording with the JSON edits in FILE. The original proposal is kept.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["task", "instructions", "resume", "evidence"])]
+    pub amend: Option<std::path::PathBuf>,
+    /// Resume TASK's failed attempt in its own worktree with the instructions.
+    #[arg(long, conflicts_with = "evidence")]
+    pub resume: bool,
+    /// Resolve TASK without a change if every approved check of the criteria passes at the Goal tip.
+    #[arg(long, conflicts_with = "instructions", requires_all = ["criterion", "path"])]
+    pub evidence: bool,
+    /// With --evidence: a criterion the tip already satisfies. All of its approved checks run. Repeatable.
+    #[arg(long, value_name = "ID", requires = "evidence")]
+    pub criterion: Vec<String>,
+    /// With --evidence: a reviewed file whose blob at the Goal tip is recorded. Repeatable.
+    #[arg(long, value_name = "PATH", requires = "evidence")]
+    pub path: Vec<String>,
 }
 
 #[derive(Parser, Debug)]

@@ -1219,3 +1219,99 @@ async fn stale_reservation_that_may_have_started_stays_blocked() {
     }
     assert!(!fixture.marker.exists());
 }
+
+/// The fixture record and plan are what versions before corrections wrote. Reviewing a
+/// correction adds no field to that record, and approval appends to that plan.
+#[tokio::test]
+async fn legacy_record_keeps_its_shape_and_its_failed_attempt_takes_a_correction() {
+    let fixture = Fixture::new("active", false, false);
+    let mut child = fixture
+        .sessions
+        .load("child")
+        .unwrap_or_else(|error| panic!("load child: {error}"));
+    child.phase = SessionPhase::Failed("fixture failure".into());
+    child.current_step = Some("run".into());
+    fixture
+        .sessions
+        .save(&child)
+        .unwrap_or_else(|error| panic!("save failed child: {error}"));
+    let plan = child.plan_path(&fixture.sessions.sessions_dir());
+    let legacy_plan =
+        fs::read_to_string(&plan).unwrap_or_else(|error| panic!("read legacy plan: {error}"));
+    let instance = fixture.start().await;
+    let manager = |args: &[&str]| {
+        let out = cli_in(
+            fixture.home.path(),
+            &fixture.repo,
+            &[&["manager"], args].concat(),
+        );
+        assert!(out.status.success(), "manager {args:?}: {out:?}");
+    };
+
+    manager(&[
+        "corrective",
+        "g",
+        "task",
+        "--resume",
+        "--instructions",
+        "Finish the work",
+    ]);
+    let reviewed = fixture.goal();
+    let execution = &reviewed["execution"];
+    let preview = &execution["corrective_preview"];
+    assert_eq!(preview["resume"]["step"], "run", "{preview}");
+    assert!(preview.get("contract_revision").is_none(), "{preview}");
+    assert!(execution.get("evidence_runs").is_none(), "{execution}");
+    for added in ["contract_revision", "corrections", "correction_pending"] {
+        assert!(execution["attempts"][0].get(added).is_none(), "{execution}");
+    }
+    assert!(!fixture.marker.exists());
+
+    manager(&["approve-corrective", "g", "--revision", "1", "--yes"]);
+    wait_for_child_marker(&fixture, &instance).await;
+    assert_eq!(
+        fs::read_to_string(&plan).unwrap_or_else(|error| panic!("read plan: {error}")),
+        format!("{legacy_plan}\n# Approved correction 1\n\nFinish the work\n")
+    );
+    assert_eq!(
+        fixture.goal()["execution"]["attempts"][0]["corrections"],
+        json!([1])
+    );
+}
+
+/// An amendment approved between `retry` saving a reservation and its dispatch reaches
+/// that child: a reservation with no published session is planned at launch.
+#[tokio::test]
+async fn unlaunched_reservation_is_planned_with_an_amendment_approved_before_dispatch() {
+    let fixture = Fixture::new("active", false, false);
+    let base = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let reviewed = Sha256::digest(b"works")
+        .iter()
+        .fold(String::new(), |mut hex, byte| {
+            use std::fmt::Write;
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        });
+    edit_goal(&fixture, |goal| {
+        goal["execution"]["attempts"]
+            .as_array_mut()
+            .unwrap_or_else(|| panic!("expected attempts"))
+            .push(json!({"task_id":"task","attempt":2,"session_id":"retry","base_sha":base,
+                "launch_started":false,"result_sha":null,"integrated":false,"integration_intent":null}));
+        goal["execution"]["corrective_approvals"] = json!([{"id":"amendment","revision":1,
+            "goal_id":"g","integrated_tip":base,"amendment":[{"criterion":"c",
+            "old_sha256":reviewed,"replace":"works","with":"works on every platform"}]}]);
+    });
+    fixture.start().await;
+    wait_for_single_launch(&fixture).await;
+    let goal = fixture.goal();
+    assert_eq!(goal["execution"]["attempts"][1]["contract_revision"], 1);
+    assert!(
+        goal["execution"]["attempts"][0]
+            .get("contract_revision")
+            .is_none()
+    );
+    let plan = fs::read_to_string(fixture.sessions.sessions_dir().join("retry/plan.md"))
+        .unwrap_or_else(|error| panic!("read reserved child plan: {error}"));
+    assert!(plan.contains("\n- c: works on every platform\n"), "{plan}");
+}

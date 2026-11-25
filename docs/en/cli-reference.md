@@ -381,10 +381,15 @@ cruise manager resume <GOAL> [TASK]
 cruise manager retry <GOAL> [TASK]
 cruise manager answer <GOAL> <PROMPT> [TEXT | --choice LABEL [--text TEXT]]
 cruise manager corrective <GOAL> <TASK> [--instructions TEXT]
+cruise manager corrective <GOAL> <TASK> --resume [--instructions TEXT]
+cruise manager corrective <GOAL> <TASK> --evidence --criterion ID... --path FILE...
+cruise manager corrective <GOAL> --amend FILE
 cruise manager approve-corrective <GOAL> [--revision N] [--yes]
 ```
 
 Experimental. Run it inside a local Git checkout; every subcommand is a daemon client. `cruise manager status` lists the Goal, task, and prompt IDs the other subcommands take; add `--json` for scripts. `say` and `propose` wait for the turn and exit non-zero if it does not complete; `--no-wait` prints the turn ID and returns. `approve` and `approve-corrective` print what they approve. Without a terminal they require both `--yes` and `--revision N`, and a revision that no longer matches is rejected. `resume GOAL TASK` continues the latest failed or suspended attempt in its worktree, `retry GOAL TASK` reserves a fresh attempt, and `retry GOAL` re-verifies a blocked Goal whose tasks are integrated. Any unapproved corrective preview is discarded and kept in the Goal’s audit history, and can no longer be approved. `answer` takes TEXT for an Ask prompt. An Option prompt uses the menu on a terminal and requires `--choice` (plus `--text` for a text-input choice) otherwise. See [Experimental Manager records](sessions.md#experimental-manager-records) for eligibility, records, and the WebUI.
+
+`corrective GOAL TASK` previews an additive task after a failed verification. `--amend FILE` previews a wording amendment of criteria or task instructions, `TASK --resume` a resume of the task's failed attempt in place with approved instructions, and `TASK --evidence` resolution of a failed task once every approved check of the given criteria passes at the Goal tip. Each preview is approved with `approve-corrective` and binds the Goal tip and contract it was reviewed against.
 
 <a id="cruise-diff"></a>
 ## `cruise diff`

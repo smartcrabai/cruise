@@ -754,8 +754,11 @@ fn manager_retry_corrective_preview_advances_revision_and_allows_fresh_approval(
     assert_stale_retry_preview(&repo, &discarded);
     let approved = manager::approve_corrective(&repo, &blocked.id, &fresh.id, fresh.revision)
         .unwrap_or_else(|e| panic!("approve fresh corrective preview: {e}"));
+    let manager::Correction::Task(task) = &fresh.correction else {
+        panic!("expected a corrective task preview");
+    };
     let mut tasks = blocked.proposal.tasks;
-    tasks.push(fresh.task.clone());
+    tasks.push(task.clone());
     assert_eq!(
         serde_json::json!(approved.proposal.tasks),
         serde_json::json!(tasks)
@@ -804,12 +807,13 @@ async fn manager_retry_distinguishes_task_from_verification_scope() {
         serde_json::json!(persisted.execution.publication_history),
         serde_json::json!([blocked.execution.publication])
     );
+    let manager::Correction::Task(task) = &preview.correction else {
+        panic!("expected a corrective task preview");
+    };
     let (status, _, html) = get(&harness, &page, &[]).await;
     assert_eq!(status, StatusCode::OK, "{html}");
     assert!(
-        !html.contains(&dialog)
-            && !html.contains(heading)
-            && !html.contains(&preview.task.instructions),
+        !html.contains(&dialog) && !html.contains(heading) && !html.contains(&task.instructions),
         "discarded corrective preview is still visible: {html}"
     );
     assert_stale_retry_preview(&repo, &preview);
@@ -1468,4 +1472,53 @@ async fn manager_child_links_to_its_goal_repository_and_remains_read_only() {
         html.contains("Open in Manager") && html.contains(&format!("href=\"/manager/{key}\"")),
         "{html}"
     );
+}
+
+#[tokio::test]
+async fn manager_page_reviews_and_approves_a_contract_amendment() {
+    let harness = harness();
+    let _data = isolate_records(&harness);
+    let repo = repository(&harness);
+    let blocked = blocked_verification(&repo);
+    let criterion = &blocked.proposal.criteria[0];
+    let edit = manager::ContractEdit {
+        target: manager::ContractTarget::Criterion(criterion.id.clone()),
+        old_sha256: String::new(),
+        replace: criterion.description.clone(),
+        with: "Narrowed criterion".into(),
+    };
+    let preview = manager::amendment(&blocked, vec![edit])
+        .and_then(|correction| {
+            let tip = &blocked.proposal.target_sha;
+            manager::preview_correction(&repo, &blocked.id, tip, 0, correction)
+        })
+        .unwrap_or_else(|e| panic!("save amendment preview: {e}"));
+    let key = key(&repo);
+
+    let (status, _, html) = get(&harness, &format!("/manager/{key}"), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    let dialog = format!("manager-approve-corrective-{}", preview.id);
+    assert!(
+        html.contains("+ Narrowed criterion") && html.contains(&dialog),
+        "{html}"
+    );
+
+    let (status, _, html) = submit(
+        &harness,
+        &format!("/webui/manager/{key}/approve-corrective"),
+        &[
+            ("goal_id", &blocked.id),
+            ("preview_id", &preview.id),
+            ("revision", &preview.revision.to_string()),
+        ],
+    )
+    .await;
+    assert!(status.is_success(), "{status}: {html}");
+    let stored = &snapshot(&repo).goals[0];
+    assert_eq!(stored.contract_revision(), 1);
+    assert_eq!(
+        serde_json::json!(stored.proposal),
+        serde_json::json!(blocked.proposal)
+    );
+    assert_eq!(stored.status, GoalStatus::Blocked);
 }

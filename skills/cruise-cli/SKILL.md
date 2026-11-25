@@ -73,7 +73,10 @@ Run it inside a local Git checkout (`cruise manager` requires one); every subcom
 | `answer <GOAL> <PROMPT> [TEXT]` | Answer a child's Ask prompt (TEXT or a terminal prompt; blank is rejected). |
 | `answer <GOAL> <PROMPT> --choice LABEL [--text TEXT]` | Answer a child's Option prompt outside a terminal with the exact label; `--text` only for text-input choices. On a terminal, Option prompts use the menu and `--choice` is rejected. |
 | `corrective <GOAL> <TASK> [--instructions TEXT]` | After a definite failed check on a blocked Goal, save a corrective task preview (instructions from the flag, terminal, or piped stdin). Authorizes nothing. |
-| `approve-corrective <GOAL> [--revision N] [--yes]` | Approve that exact preview with the same confirmation and revision rules as `approve`. A changed preview or integrated tip needs fresh review. |
+| `corrective <GOAL> <TASK> --resume [--instructions TEXT]` | Preview resuming the task's **failed** attempt in its own session and worktree with instructions appended to its plan. Bound to the attempt, failed step, worktree content, Goal tip, and contract: a change before launch refuses it, and it must be previewed again. |
+| `corrective <GOAL> <TASK> --evidence --criterion ID… --path FILE…` | Preview resolving a failed task the Goal tip already satisfies. After approval the daemon runs **every** approved check of those criteria at that exact tip; all green resolves the task without a commit, anything else leaves it failed and is never rerun automatically. |
+| `corrective <GOAL> --amend FILE` | Preview a narrow wording amendment of criteria or task instructions. FILE is a JSON array such as `[{"criterion":"C1","replace":"old","with":"new"}]` (`"task"` for instructions, optional `"old_sha256"`). The proposal is never rewritten and checks cannot be amended. |
+| `approve-corrective <GOAL> [--revision N] [--yes]` | Approve that exact preview with the same confirmation and revision rules as `approve`. A changed preview, integrated tip, or contract needs fresh review. |
 
 Typical scripted flow (approval requires the user's explicit authorization — never self-approve on their behalf):
 
@@ -91,6 +94,7 @@ Constraints and gotchas:
 - Execution requires Git 2.38+ and an authenticated GitHub or GitLab `origin` (fetch and push URLs must match).
 - Manager-owned child sessions are read-only elsewhere: `cruise list` offers only **View Diff** (when available) and **Back**, and their WebUI pages are read-only with **Open in Manager**. Answer their Ask/Option prompts with `cruise manager answer` or the Manager page, not `cruise run`.
 - A failed check blocks the Goal (`status` shows `reason`). Choose `retry <GOAL>` for a flaky check, or `corrective` + `approve-corrective` to add a fix task. If verification fails again after a retry, create a fresh corrective preview rather than approving a discarded one. Failed children name the exact `resume`/`retry` command in the Goal reason.
+- `corrective --resume`, `--evidence`, and `--amend` act on an active Goal and are separate approval units: show the user each saved preview (`status --json`, `.goals[].execution.corrective_preview`) and approve only the revision they approved. `resume`/`retry` never deliver an unapproved correction. Evidence results are in `.goals[].execution.evidence_runs`; an `unresolved` outcome keeps the task failed.
 - New conversation turns and proposals need the daemon to reach the SDK provider. The WebUI **Manager** page opens only repositories with an existing record and an accessible main checkout on the daemon host.
 
 ## Which command do I want?

@@ -12,7 +12,7 @@ sig Preview { reviewedTip: one Tip }
 abstract sig Phase {}
 one sig Draft, Active, Paused, Blocked, Verifying, ReadyToPublish, AwaitingMerge, Completed extends Phase {}
 abstract sig Event {}
-one sig Init, Edit, Approve, Dispatch, Integrate, Pause, Resume, Fail,
+one sig Init, Edit, Approve, Dispatch, Integrate, Resolve, Pause, Resume, Fail,
         BeginVerify, VerifyPass, VerifyFail, RetryVerify, RejectRetry,
         SaveCorrective, ApproveCorrective, RejectCorrective,
         Publish, ObserveMerge, ObserveOtherMerge, Idle extends Event {}
@@ -23,6 +23,7 @@ sig State {
   approved: lone Revision,
   launched: set Task,
   integrated: set Task,
+  resolved: set Task,
   tip: one Tip,
   verified: lone Tip,
   published: lone Tip,
@@ -40,40 +41,53 @@ fact TaskGraph { no t: Task | t in t.^deps }
 fun authorized[s: State]: set Task {
   Task - CorrectiveTask + (some s.correctiveApproval => CorrectiveTask else none)
 }
+// Dependents and verification wait for an integration or an evidence resolution.
+fun done[s: State]: set Task { s.integrated + s.resolved }
 pred initial[s: State] {
-  s.phase = Draft and no s.approved + s.launched + s.integrated + s.verified + s.published + s.observed
+  s.phase = Draft and no s.approved + s.launched + done[s] + s.verified + s.published + s.observed
   no s.failedCheck + s.verificationAudit
   no s.preview + s.lastRevision + s.discarded + s.correctiveApproval + s.requested
   s.event = Init
 }
 pred unchanged[a,b: State] {
   b.proposal = a.proposal and b.approved = a.approved and
-  b.launched = a.launched and b.integrated = a.integrated and
+  b.launched = a.launched and b.integrated = a.integrated and b.resolved = a.resolved and
   b.tip = a.tip and b.verified = a.verified
 }
 pred edit[a,b: State] {
   a.phase = Draft and b.phase = Draft and b.proposal != a.proposal
-  no b.approved + b.launched + b.integrated + b.verified
+  no b.approved + b.launched + done[b] + b.verified
   b.tip = a.tip and b.event = Edit
 }
 pred approve[a,b: State] {
   a.phase = Draft and b.phase = Active and b.proposal = a.proposal
-  b.approved = a.proposal and no b.launched + b.integrated + b.verified
+  b.approved = a.proposal and no b.launched + done[b] + b.verified
   b.tip = a.tip and b.event = Approve
 }
 pred dispatch[a,b: State] {
   a.phase = Active and some t: authorized[a] - a.launched |
-    t.deps in a.integrated and b.launched = a.launched + t
+    t.deps in done[a] and b.launched = a.launched + t
   b.phase = a.phase and b.proposal = a.proposal and b.approved = a.approved
-  b.integrated = a.integrated and b.tip = a.tip and b.verified = a.verified
+  b.integrated = a.integrated and b.resolved = a.resolved
+  b.tip = a.tip and b.verified = a.verified
   b.event = Dispatch
 }
 pred integrate[a,b: State] {
-  a.phase = Active and some t: a.launched - a.integrated |
+  a.phase = Active and some t: a.launched - done[a] |
     b.integrated = a.integrated + t
   b.phase = a.phase and b.proposal = a.proposal and b.approved = a.approved
-  b.launched = a.launched and b.tip != a.tip and no b.verified
+  b.launched = a.launched and b.resolved = a.resolved and b.tip != a.tip and no b.verified
   b.event = Integrate
+}
+// Approved evidence resolves a launched task that failed. Nothing is committed, so the
+// tip stays, and the task is never counted as integrated.
+pred resolve[a,b: State] {
+  a.phase = Active and some t: a.launched - done[a] |
+    b.resolved = a.resolved + t
+  b.phase = a.phase and b.proposal = a.proposal and b.approved = a.approved
+  b.launched = a.launched and b.integrated = a.integrated
+  b.tip = a.tip and b.verified = a.verified
+  b.event = Resolve
 }
 // Include a paused Goal with a saved preview to model the rejected-retry fixture.
 pred pause[a,b: State] {
@@ -86,17 +100,17 @@ pred resume[a,b: State] {
 }
 pred fail[a,b: State] { a.phase = Active and b.phase = Blocked and unchanged[a,b] and b.event = Fail }
 pred beginVerify[a,b: State] {
-  a.phase = Active and a.integrated = authorized[a] and b.phase = Verifying
+  a.phase = Active and done[a] = authorized[a] and b.phase = Verifying
   unchanged[a,b] and b.event = BeginVerify
 }
 pred verifyPass[a,b: State] {
   a.phase = Verifying and b.phase = ReadyToPublish and b.verified = a.tip
   b.proposal = a.proposal and b.approved = a.approved and b.launched = a.launched
-  b.integrated = a.integrated and b.tip = a.tip and b.event = VerifyPass
+  b.integrated = a.integrated and b.resolved = a.resolved and b.tip = a.tip and b.event = VerifyPass
 }
 pred verifyFail[a,b: State] { a.phase = Verifying and b.phase = Blocked and unchanged[a,b] and b.event = VerifyFail }
 pred eligibleForRetry[s: State] {
-  s.phase = Blocked and s.integrated = authorized[s] and some s.failedCheck
+  s.phase = Blocked and done[s] = authorized[s] and some s.failedCheck
 }
 pred retryVerify[a,b: State] {
   eligibleForRetry[a] and b.phase = Verifying
@@ -143,7 +157,7 @@ pred idle[a,b: State] { b.phase = a.phase and unchanged[a,b] and b.event = Idle 
 fact Trace {
   initial[first]
   all a: State - last | let b = next[a] |
-    edit[a,b] or approve[a,b] or dispatch[a,b] or integrate[a,b] or
+    edit[a,b] or approve[a,b] or dispatch[a,b] or integrate[a,b] or resolve[a,b] or
     pause[a,b] or resume[a,b] or fail[a,b] or beginVerify[a,b] or
     verifyPass[a,b] or verifyFail[a,b] or retryVerify[a,b] or rejectRetry[a,b] or
     saveCorrective[a,b] or approveCorrective[a,b] or rejectCorrective[a,b] or publish[a,b] or
@@ -172,12 +186,19 @@ assert ApprovalGatesExecution {
 }
 assert DependenciesBeforeDispatch {
   all a: State - last | let b = next[a] | b.event = Dispatch implies
-    (b.launched - a.launched).deps in a.integrated
+    (b.launched - a.launched).deps in done[a]
 }
-assert IntegratedWasLaunched { all s: State | s.integrated in s.launched }
+assert IntegratedWasLaunched { all s: State | done[s] in s.launched }
+assert EvidenceIsNotIntegration {
+  all s: State | no s.integrated & s.resolved
+  all a: State - last | let b = next[a] | b.event = Resolve implies {
+    b.tip = a.tip and b.integrated = a.integrated and b.launched = a.launched
+    a.resolved in b.resolved and b.resolved != a.resolved
+  }
+}
 assert VerificationGatesPublication {
   all s: State | s.phase in ReadyToPublish + AwaitingMerge + Completed implies
-    s.integrated = authorized[s] and s.verified = s.tip
+    done[s] = authorized[s] and s.verified = s.tip
 }
 assert CompletionRequiresMatchingHumanMerge {
   all s: State | s.phase = Completed implies
@@ -188,7 +209,7 @@ assert PublicationDoesNotComplete {
 }
 assert PausedDoesNotAdvanceWork {
   all a: State - last | a.phase = Paused implies
-    next[a].launched = a.launched and next[a].integrated = a.integrated
+    next[a].launched = a.launched and done[next[a]] = done[a]
 }
 assert RetryArchivesAndClearsPreview {
   all a: State - last | let b = next[a] | b.event = RetryVerify implies {
@@ -226,6 +247,11 @@ pred SuccessfulGoal { some s: State | s.phase = Completed }
 pred DependencyExecution {
   some disj x,y: Task | x in y.deps and some a,b: State |
     a.event = Integrate and x in a.integrated and b in a.^next and
+    b.event = Dispatch and y in b.launched
+}
+pred EvidenceUnblocksDependent {
+  some disj x,y: Task | x in y.deps and some a,b: State |
+    a.event = Resolve and x in a.resolved and b in a.^next and
     b.event = Dispatch and y in b.launched
 }
 pred FailedVerificationRetry {
@@ -273,11 +299,13 @@ check VerificationGatesPublication for exactly 10 State, exactly 2 Task, exactly
 check CompletionRequiresMatchingHumanMerge for exactly 10 State, exactly 2 Task, exactly 2 Revision, exactly 3 Tip, exactly 1 Preview expect 0
 check PublicationDoesNotComplete for exactly 10 State, exactly 2 Task, exactly 2 Revision, exactly 3 Tip, exactly 1 Preview expect 0
 check PausedDoesNotAdvanceWork for exactly 10 State, exactly 2 Task, exactly 2 Revision, exactly 3 Tip, exactly 1 Preview expect 0
+check EvidenceIsNotIntegration for exactly 10 State, exactly 2 Task, exactly 2 Revision, exactly 3 Tip, exactly 1 Preview expect 0
 check RetryArchivesAndClearsPreview for exactly 12 State, exactly 2 Task, exactly 1 CorrectiveTask, exactly 2 Preview, exactly 2 Revision, exactly 3 Tip expect 0
 check DiscardedPreviewNeverAuthorizes for exactly 12 State, exactly 2 Task, exactly 1 CorrectiveTask, exactly 2 Preview, exactly 2 Revision, exactly 3 Tip expect 0
 check RejectedRetryLeavesGoalUnchanged for exactly 12 State, exactly 2 Task, exactly 1 CorrectiveTask, exactly 2 Preview, exactly 2 Revision, exactly 3 Tip expect 0
 run SuccessfulGoal for exactly 11 State, exactly 2 Task, exactly 0 CorrectiveTask, exactly 2 Revision, exactly 3 Tip, exactly 1 Preview expect 1
 run DependencyExecution for exactly 10 State, exactly 2 Task, exactly 0 CorrectiveTask, exactly 2 Revision, exactly 3 Tip, exactly 1 Preview expect 1
+run EvidenceUnblocksDependent for exactly 10 State, exactly 2 Task, exactly 0 CorrectiveTask, exactly 2 Revision, exactly 3 Tip, exactly 1 Preview expect 1
 run FailedVerificationRetry for exactly 10 State, exactly 2 Task, exactly 0 CorrectiveTask, exactly 2 Revision, exactly 3 Tip, exactly 1 Preview expect 1
 run PausedThenResumed for exactly 10 State, exactly 2 Task, exactly 0 CorrectiveTask, exactly 2 Revision, exactly 3 Tip, exactly 1 Preview expect 1
 run OtherMergeDoesNotComplete for exactly 10 State, exactly 2 Task, exactly 0 CorrectiveTask, exactly 2 Revision, exactly 3 Tip, exactly 1 Preview expect 1
