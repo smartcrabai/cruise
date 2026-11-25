@@ -33,15 +33,123 @@ pub struct Task {
     pub dependencies: Vec<String>,
 }
 
-/// A review-only additive task bound to the failed verification's exact tip.
-/// Merely saving this record never authorizes scheduling.
+/// A reviewed change to an approved Goal, bound to the exact tip and contract revision it
+/// was reviewed against. Merely saving this record never authorizes anything.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CorrectivePreview {
     pub id: String,
     pub revision: u64,
     pub goal_id: String,
     pub integrated_tip: String,
-    pub task: Task,
+    /// Number of approved contract amendments when this preview was saved.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub contract_revision: u64,
+    #[serde(flatten)]
+    pub correction: Correction,
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if callbacks receive a field reference"
+)]
+pub(crate) fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Correction {
+    /// An additive task after a definite failed verification.
+    Task(Task),
+    /// Narrow wording changes, kept apart from the original proposal.
+    Amendment(Vec<ContractEdit>),
+    /// Instructions for resuming one failed attempt in its own worktree.
+    Resume(AttemptCorrection),
+    /// A task whose requirement the integrated tip may already satisfy.
+    Evidence(EvidenceRequest),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContractTarget {
+    Criterion(String),
+    Task(String),
+}
+
+impl ContractTarget {
+    /// Kind and ID as shown to the child and in PR evidence.
+    pub(crate) fn label(&self) -> (&'static str, &str) {
+        match self {
+            Self::Criterion(id) => ("criterion", id),
+            Self::Task(id) => ("task", id),
+        }
+    }
+}
+
+/// Replace one passage of a criterion description or of task instructions. Checks, IDs
+/// and dependencies are not amendable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractEdit {
+    #[serde(flatten)]
+    pub target: ContractTarget,
+    /// SHA-256 of the whole target text before this amendment. Set by the daemon.
+    #[serde(default)]
+    pub old_sha256: String,
+    pub replace: String,
+    pub with: String,
+}
+
+/// Everything the owner reviewed about the attempt, checked again until it launches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptCorrection {
+    pub task_id: String,
+    pub attempt: u32,
+    pub session_id: String,
+    pub base_sha: String,
+    /// Step the saved checkpoint resumes from.
+    pub step: String,
+    pub head: String,
+    /// SHA-256 over the worktree's uncommitted and untracked content.
+    pub state: String,
+    pub instructions: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceRequest {
+    pub task_id: String,
+    pub attempt: u32,
+    pub session_id: String,
+    pub criteria: Vec<String>,
+    /// Every approved check of those criteria. The requester cannot narrow this set.
+    pub checks: Vec<String>,
+    pub blobs: Vec<ReviewedBlob>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewedBlob {
+    pub path: String,
+    pub blob: String,
+}
+
+/// One execution of an approved evidence request. Only a complete passing result at the
+/// approved tip resolves the task; it is never an integration and never replayed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceRun {
+    /// Approved preview that fixes the tip, contract, checks and reviewed blobs.
+    pub revision: u64,
+    pub task_id: String,
+    pub worktree: PathBuf,
+    /// Saved before the first effect, so a started run found again was interrupted.
+    pub started: bool,
+    pub checks: Vec<crate::manager_git::CheckEvidence>,
+    pub outcome: Option<EvidenceOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceOutcome {
+    Resolved,
+    Unresolved(String),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Proposal {
@@ -196,12 +304,14 @@ pub struct GoalExecution {
     pub publication_history: Vec<crate::manager_publication::Publication>,
     #[serde(default)]
     pub corrective_preview: Option<CorrectivePreview>,
-    /// Immutable audit trail of explicitly approved additive tasks.
+    /// Immutable audit trail of explicitly approved corrections, in approval order.
     #[serde(default)]
     pub corrective_approvals: Vec<CorrectivePreview>,
     /// Audit trail of unapproved previews discarded by an explicit verification retry.
     #[serde(default)]
     pub corrective_discarded: Vec<CorrectivePreview>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_runs: Vec<EvidenceRun>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,6 +335,15 @@ pub struct TaskAttempt {
     #[serde(default)]
     pub integrated: bool,
     pub integration_intent: Option<crate::manager_git::IntegrationIntent>,
+    /// Approved contract amendments this attempt's plan was built with.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub contract_revision: u64,
+    /// Approved corrections that are part of this attempt's plan, by preview revision.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub corrections: Vec<u64>,
+    /// Approved correction that the pending resume must deliver.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correction_pending: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -373,15 +492,201 @@ fn verify_contract(cwd: &Path, repo: &Path, proposal: &Proposal) -> Result<()> {
     crate::config::validate_config(&contract.workflow)?;
     Ok(())
 }
-fn record_path(repo: &Path) -> Result<PathBuf> {
-    let digest = Sha256::digest(repo.to_string_lossy().as_bytes());
-    let mut key = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        let _ = write!(key, "{byte:02x}");
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(hex, "{byte:02x}");
     }
+    hex
+}
+fn hex_digest(bytes: &[u8]) -> String {
+    hex(&Sha256::digest(bytes))
+}
+fn record_path(repo: &Path) -> Result<PathBuf> {
+    let key = hex_digest(repo.to_string_lossy().as_bytes());
     Ok(crate::paths::data_dir()?
         .join("manager")
         .join(format!("{key}.json")))
+}
+
+impl Goal {
+    fn amendments(&self) -> impl Iterator<Item = &Vec<ContractEdit>> {
+        self.execution
+            .corrective_approvals
+            .iter()
+            .filter_map(|approved| match &approved.correction {
+                Correction::Amendment(edits) => Some(edits),
+                _ => None,
+            })
+    }
+
+    /// Number of approved contract amendments. Revision 0 is the original proposal.
+    pub(crate) fn contract_revision(&self) -> u64 {
+        self.amendments().count() as u64
+    }
+
+    /// Text of one criterion after the first `revision` approved amendments. The proposal
+    /// itself is never rewritten, so every earlier revision stays readable.
+    pub(crate) fn criterion_text(&self, id: &str, revision: u64) -> Result<String> {
+        let original = self
+            .proposal
+            .criteria
+            .iter()
+            .find(|criterion| criterion.id == id)
+            .ok_or_else(|| CruiseError::Other("unknown contract criterion".into()))?;
+        self.amended(
+            &original.description,
+            revision,
+            |target| matches!(target, ContractTarget::Criterion(criterion) if criterion == id),
+        )
+    }
+
+    /// Instructions of one task after the first `revision` approved amendments.
+    pub(crate) fn task_text(&self, id: &str, revision: u64) -> Result<String> {
+        let original = self
+            .proposal
+            .tasks
+            .iter()
+            .find(|task| task.id == id)
+            .ok_or_else(|| CruiseError::Other("unknown contract task".into()))?;
+        self.amended(
+            &original.instructions,
+            revision,
+            |target| matches!(target, ContractTarget::Task(task) if task == id),
+        )
+    }
+
+    fn contract_text(&self, target: &ContractTarget, revision: u64) -> Result<String> {
+        match target {
+            ContractTarget::Criterion(id) => self.criterion_text(id, revision),
+            ContractTarget::Task(id) => self.task_text(id, revision),
+        }
+    }
+
+    /// Every target amended after revision `from` up to `to`, with its text at `to`.
+    pub(crate) fn amended_between(
+        &self,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<(&ContractTarget, String)>> {
+        let skip = usize::try_from(from).unwrap_or(usize::MAX);
+        let take = usize::try_from(to.saturating_sub(from)).unwrap_or(usize::MAX);
+        let mut changed: Vec<(&ContractTarget, String)> = Vec::new();
+        for edit in self.amendments().skip(skip).take(take).flatten() {
+            if !changed.iter().any(|(target, _)| *target == &edit.target) {
+                changed.push((&edit.target, self.contract_text(&edit.target, to)?));
+            }
+        }
+        Ok(changed)
+    }
+
+    fn amended(
+        &self,
+        original: &str,
+        revision: u64,
+        is_target: impl Fn(&ContractTarget) -> bool,
+    ) -> Result<String> {
+        let revision = usize::try_from(revision).unwrap_or(usize::MAX);
+        let mut text = original.to_owned();
+        for edits in self.amendments().take(revision) {
+            let mut edits = edits
+                .iter()
+                .filter(|edit| is_target(&edit.target))
+                .peekable();
+            if edits.peek().is_some() {
+                text = amend(&text, edits)?;
+            }
+        }
+        Ok(text)
+    }
+
+    /// An approved evidence run resolved this task without a child integration.
+    pub(crate) fn task_resolved(&self, task_id: &str) -> bool {
+        self.execution
+            .evidence_runs
+            .iter()
+            .any(|run| run.task_id == task_id && run.outcome == Some(EvidenceOutcome::Resolved))
+    }
+
+    /// Dependents may start: a child was integrated, or evidence resolved the task.
+    pub(crate) fn task_done(&self, task_id: &str) -> bool {
+        self.task_resolved(task_id)
+            || self
+                .execution
+                .attempts
+                .iter()
+                .any(|attempt| attempt.task_id == task_id && attempt.integrated)
+    }
+
+    pub(crate) fn approved(&self, revision: u64) -> Option<&CorrectivePreview> {
+        self.execution
+            .corrective_approvals
+            .iter()
+            .find(|approved| approved.revision == revision)
+    }
+
+    /// The pending preview, only when it is exactly the one the human reviewed.
+    pub(crate) fn reviewed_preview(
+        &self,
+        preview_id: &str,
+        revision: u64,
+    ) -> Result<&CorrectivePreview> {
+        self.execution
+            .corrective_preview
+            .as_ref()
+            .filter(|preview| {
+                preview.id == preview_id
+                    && preview.revision == revision
+                    && preview.goal_id == self.id
+            })
+            .ok_or_else(|| CruiseError::Busy("stale or unknown corrective preview".into()))
+    }
+}
+
+/// Apply one amendment's edits to the text they target. Each edit names the digest of the
+/// text it was reviewed against and replaces a passage that occurs exactly once.
+fn amend<'a>(text: &str, edits: impl Iterator<Item = &'a ContractEdit>) -> Result<String> {
+    let reviewed = hex_digest(text.as_bytes());
+    let mut amended = text.to_owned();
+    for edit in edits {
+        if edit.old_sha256 != reviewed
+            || edit.replace.is_empty()
+            || edit.replace == edit.with
+            || amended.matches(&edit.replace).count() != 1
+        {
+            return Err(CruiseError::Other(
+                "contract amendment does not match the reviewed text".into(),
+            ));
+        }
+        amended = amended.replacen(&edit.replace, &edit.with, 1);
+    }
+    if amended.trim().is_empty() {
+        return Err(CruiseError::Other(
+            "contract amendment leaves an empty criterion or task".into(),
+        ));
+    }
+    Ok(amended)
+}
+
+/// Bind requested edits to the exact text they amend at the current contract revision. A
+/// requester may name the digest of the text it reviewed; any other text is refused.
+pub(crate) fn amendment(goal: &Goal, mut edits: Vec<ContractEdit>) -> Result<Correction> {
+    if edits.is_empty() {
+        return Err(CruiseError::Other("contract amendment is empty".into()));
+    }
+    let revision = goal.contract_revision();
+    for edit in &mut edits {
+        if edit.old_sha256.is_empty() {
+            edit.old_sha256 = hex_digest(goal.contract_text(&edit.target, revision)?.as_bytes());
+        }
+    }
+    for edit in &edits {
+        amend(
+            &goal.contract_text(&edit.target, revision)?,
+            edits.iter().filter(|other| other.target == edit.target),
+        )?;
+    }
+    Ok(Correction::Amendment(edits))
 }
 fn load(repo: PathBuf) -> Result<Snapshot> {
     let path = record_path(&repo)?;
@@ -762,6 +1067,41 @@ pub(crate) fn fail_turn(cwd: &Path, id: &str, error: &str) -> Result<()> {
     save(&snapshot)
 }
 
+fn stage_preview(goal: &mut Goal, tip: &str, correction: Correction) -> Result<CorrectivePreview> {
+    let revision = goal
+        .execution
+        .corrective_preview
+        .iter()
+        .chain(&goal.execution.corrective_approvals)
+        .chain(&goal.execution.corrective_discarded)
+        .map(|preview| preview.revision)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| CruiseError::Other("corrective preview revision exhausted".into()))?;
+    let preview = CorrectivePreview {
+        id: uuid::Uuid::new_v4().to_string(),
+        revision,
+        goal_id: goal.id.clone(),
+        integrated_tip: tip.to_owned(),
+        contract_revision: goal.contract_revision(),
+        correction,
+    };
+    goal.execution.corrective_preview = Some(preview.clone());
+    Ok(preview)
+}
+
+fn reviewed_state_unchanged(goal: &Goal, tip: &str, contract_revision: u64) -> Result<()> {
+    if goal.execution.integrated_tip.as_deref() != Some(tip)
+        || goal.contract_revision() != contract_revision
+    {
+        return Err(CruiseError::Busy(
+            "Goal tip or contract changed; refresh before corrective review".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Persist a corrective task preview without authorizing execution.
 pub(crate) fn preview_corrective(
     cwd: &Path,
@@ -795,30 +1135,45 @@ pub(crate) fn preview_corrective(
                 "invalid corrective task or dependencies".into(),
             ));
         }
-        let revision = goal
-            .execution
-            .corrective_preview
-            .iter()
-            .chain(&goal.execution.corrective_approvals)
-            .chain(&goal.execution.corrective_discarded)
-            .map(|preview| preview.revision)
-            .max()
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or_else(|| CruiseError::Other("corrective preview revision exhausted".into()))?;
-        let preview = CorrectivePreview {
-            id: uuid::Uuid::new_v4().to_string(),
-            revision,
-            goal_id: goal.id.clone(),
-            integrated_tip: tip.to_owned(),
-            task,
-        };
-        goal.execution.corrective_preview = Some(preview.clone());
-        Ok(preview)
+        stage_preview(goal, expected_tip, Correction::Task(task))
     })
 }
 
-/// Approve exactly the preview displayed to the human, without changing the
+/// Persist a correction built from the Goal as it was at `expected_tip` and
+/// `contract_revision`. Like every preview, it authorizes nothing.
+pub(crate) fn preview_correction(
+    cwd: &Path,
+    goal_id: &str,
+    expected_tip: &str,
+    contract_revision: u64,
+    correction: Correction,
+) -> Result<CorrectivePreview> {
+    update_goal(cwd, goal_id, |goal| {
+        reviewed_state_unchanged(goal, expected_tip, contract_revision)?;
+        stage_preview(goal, expected_tip, correction)
+    })
+}
+
+/// Move exactly the reviewed preview into the approval trail. `authorize` records what the
+/// approval allows in the same write, so neither can exist without the other.
+pub(crate) fn approve_correction(
+    cwd: &Path,
+    goal_id: &str,
+    preview_id: &str,
+    revision: u64,
+    authorize: impl FnOnce(&mut Goal, &CorrectivePreview) -> Result<()>,
+) -> Result<Goal> {
+    update_goal(cwd, goal_id, |goal| {
+        let preview = goal.reviewed_preview(preview_id, revision)?.clone();
+        reviewed_state_unchanged(goal, &preview.integrated_tip, preview.contract_revision)?;
+        authorize(goal, &preview)?;
+        goal.execution.corrective_approvals.push(preview);
+        goal.execution.corrective_preview = None;
+        Ok(goal.clone())
+    })
+}
+
+/// Approve exactly the corrective task displayed to the human, without changing the
 /// approved checks or discarding any prior execution and verification evidence.
 pub(crate) fn approve_corrective(
     cwd: &Path,
@@ -835,24 +1190,19 @@ pub(crate) fn approve_corrective(
         {
             return Ok(goal.clone());
         }
-        let preview = goal
-            .execution
-            .corrective_preview
-            .as_ref()
-            .filter(|preview| {
-                preview.id == preview_id
-                    && preview.revision == revision
-                    && preview.goal_id == goal.id
-            })
-            .ok_or_else(|| CruiseError::Busy("stale or unknown corrective preview".into()))?
-            .clone();
+        let preview = goal.reviewed_preview(preview_id, revision)?.clone();
+        let Correction::Task(task) = &preview.correction else {
+            return Err(CruiseError::Other(
+                "corrective preview is not an additive task".into(),
+            ));
+        };
         if crate::manager_publication::corrective_tip(goal)? != preview.integrated_tip.as_str() {
             return Err(CruiseError::Busy(
                 "Goal tip changed; refresh before corrective review".into(),
             ));
         }
         let mut proposal = goal.proposal.clone();
-        proposal.tasks.push(preview.task.clone());
+        proposal.tasks.push(task.clone());
         proposal.validate()?;
         let publication = goal
             .execution

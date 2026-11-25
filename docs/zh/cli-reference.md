@@ -380,10 +380,15 @@ cruise manager resume <GOAL> [TASK]
 cruise manager retry <GOAL> [TASK]
 cruise manager answer <GOAL> <PROMPT> [TEXT | --choice LABEL [--text TEXT]]
 cruise manager corrective <GOAL> <TASK> [--instructions TEXT]
+cruise manager corrective <GOAL> <TASK> --resume [--instructions TEXT]
+cruise manager corrective <GOAL> <TASK> --evidence --criterion ID... --path FILE...
+cruise manager corrective <GOAL> --amend FILE
 cruise manager approve-corrective <GOAL> [--revision N] [--yes]
 ```
 
 实验性功能。请在本地 Git 工作区中运行；所有子命令都是 daemon 客户端。其他子命令所需的 Goal、任务和提示 ID 可通过 `cruise manager status` 查看，脚本可加上 `--json`。`say` 和 `propose` 会等待轮次完成，未完成时以非零状态退出；`--no-wait` 输出轮次 ID 后立即返回。`approve` 和 `approve-corrective` 会显示所批准的内容。没有终端时必须同时指定 `--yes` 和 `--revision N`，不再匹配的版本会被拒绝。`resume GOAL TASK` 在原工作树中继续最近失败或暂停的尝试，`retry GOAL TASK` 预留新的尝试，`retry GOAL` 重新验证任务均已集成的阻塞目标。未批准的修正预览会被丢弃并保留在目标的审计历史中，此后无法批准。`answer` 为 Ask 提示接收 TEXT。Option 提示在终端中使用菜单，否则必须指定 `--choice`（文本输入选项还需 `--text`）。条件、记录和 WebUI 请参阅[实验性 Manager 记录](sessions.md#实验性-manager-记录)。
+
+`corrective GOAL TASK` 在验证失败后预览新增任务。`--amend FILE` 预览对标准或任务说明措辞的修正，`TASK --resume` 预览带已批准说明原地继续该任务失败的尝试，`TASK --evidence` 预览在指定标准的全部已批准检查于 Goal tip 通过后解决失败的任务。每个预览都通过 `approve-corrective` 批准，并绑定审查时的 Goal tip 和契约。
 
 <a id="cruise-diff"></a>
 ## `cruise diff`

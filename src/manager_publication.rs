@@ -22,6 +22,9 @@ pub struct Publication {
     forge_kind: crate::forge::ForgeKind,
     forge_host: String,
     forge_repository: String,
+    /// Approved contract amendments the verification and its PR evidence refer to.
+    #[serde(default, skip_serializing_if = "manager::is_zero")]
+    contract_revision: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,12 +82,15 @@ pub(crate) fn effect_guard(
     cwd: &Path,
     id: &str,
     cancel: &crate::cancellation::CancellationToken,
+    status: &GoalStatus,
 ) -> Result<std::sync::MutexGuard<'static, ()>> {
     let guard = crate::manager_coordinator::CONTROL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if cancel.is_cancelled() || load(cwd, id)?.status != GoalStatus::Verifying {
-        return Err(error("Goal is paused, stopped, or no longer verifying"));
+    if cancel.is_cancelled() || load(cwd, id)?.status != *status {
+        return Err(error(
+            "Goal is paused, stopped, or no longer in the state this effect was started for",
+        ));
     }
     Ok(guard)
 }
@@ -134,6 +140,9 @@ fn save(
         if goal.execution.integrated_tip.as_deref() != Some(publication.tip.as_str()) {
             return Err(error("Goal tip changed during publication"));
         }
+        if goal.contract_revision() != publication.contract_revision {
+            return Err(error("Goal contract changed during publication"));
+        }
         goal.execution.publication = Some(publication);
         goal.status = status;
         goal.reason = reason;
@@ -172,6 +181,102 @@ fn matches_request(pr: &PullRequest, repo: &str, goal: &Goal, p: &Publication) -
         && pr.head_sha == p.tip
 }
 
+/// PR description: the amendments and evidence that the verified contract consists of.
+/// A Goal without either keeps the plain description.
+fn publication_body(goal: &Goal) -> String {
+    use std::fmt::Write as _;
+    let quote = |body: &mut String, label: &str, text: &str| {
+        let _ = writeln!(body, "  - {label}:");
+        for line in text.lines() {
+            let _ = writeln!(body, "    > {line}");
+        }
+    };
+    let mut body = String::from("Created by Cruise Manager. Merge manually after review.");
+    let mut amendments = 0;
+    for approved in &goal.execution.corrective_approvals {
+        let manager::Correction::Amendment(edits) = &approved.correction else {
+            continue;
+        };
+        if amendments == 0 {
+            let _ = writeln!(
+                body,
+                "\n\n## Approved contract amendments\n\nProposal `{}` revision {} is unchanged. Children reserved after each approval and this verification use the amended text.",
+                goal.proposal.id, goal.proposal.revision
+            );
+        }
+        amendments += 1;
+        for edit in edits {
+            let (kind, id) = edit.target.label();
+            let _ = writeln!(
+                body,
+                "\n- Amendment {amendments} (corrective revision {}), {kind} `{id}`, previous text sha256 `{}`",
+                approved.revision, edit.old_sha256
+            );
+            quote(&mut body, "replaced", &edit.replace);
+            quote(&mut body, "with", &edit.with);
+        }
+    }
+    let mut resolved = false;
+    for run in &goal.execution.evidence_runs {
+        let Some((approved, manager::Correction::Evidence(request))) = goal
+            .approved(run.revision)
+            .filter(|_| run.outcome == Some(manager::EvidenceOutcome::Resolved))
+            .map(|approved| (approved, &approved.correction))
+        else {
+            continue;
+        };
+        if !resolved {
+            body.push_str("\n\n## Tasks resolved by evidence\n\nNo child commit was integrated for these tasks. Every approved check of the listed criteria passed at the recorded tip, and the full verification ran again at this head.\n");
+        }
+        resolved = true;
+        let _ = write!(
+            body,
+            "\n- `{}` at `{}` (corrective revision {}): criteria {}; checks {}; reviewed",
+            run.task_id,
+            approved.integrated_tip,
+            run.revision,
+            request.criteria.join(", "),
+            request.checks.join(", ")
+        );
+        for blob in &request.blobs {
+            let _ = write!(body, " `{}` blob `{}`", blob.path, blob.blob);
+        }
+        body.push('\n');
+    }
+    body
+}
+
+/// Every task has a pinned integrated result or was resolved by evidence.
+fn every_task_done(goal: &Goal) -> bool {
+    goal.proposal.tasks.iter().all(|task| {
+        goal.task_resolved(&task.id)
+            || goal.execution.attempts.iter().any(|attempt| {
+                attempt.task_id == task.id && attempt.integrated && attempt.result_sha.is_some()
+            })
+    })
+}
+
+/// A contract amendment must not change what a started verification or publication was
+/// run against. A Goal blocked before any push starts a fresh verification afterwards.
+pub(crate) fn validate_amendable(goal: &Goal) -> Result<()> {
+    let phase = goal.execution.publication.as_ref().map(|p| p.phase);
+    let amendable = match goal.status {
+        GoalStatus::Active => phase.is_none(),
+        GoalStatus::Blocked => matches!(
+            phase,
+            None | Some(Phase::WorktreeIntent | Phase::Ready | Phase::CheckIntent)
+        ),
+        _ => false,
+    };
+    if amendable {
+        Ok(())
+    } else {
+        Err(error(
+            "Goal verification or publication is in progress; its contract cannot be amended",
+        ))
+    }
+}
+
 /// A corrective preview is meaningful only after a definite failed approved
 /// check, before any push or PR creation. Interrupted or dirty checks require
 /// recovery instead of treating their outcome as a task specification.
@@ -180,11 +285,7 @@ pub(crate) fn corrective_tip(goal: &Goal) -> Result<&str> {
         return Err(error("Goal is not blocked by a failed verification"));
     }
     crate::manager_coordinator::validate_execution_contract(goal)?;
-    if goal.proposal.tasks.iter().any(|task| {
-        !goal.execution.attempts.iter().any(|attempt| {
-            attempt.task_id == task.id && attempt.integrated && attempt.result_sha.is_some()
-        })
-    }) {
+    if !every_task_done(goal) {
         return Err(error("Goal has tasks that are not integrated"));
     }
     let p = goal
@@ -237,11 +338,7 @@ pub(crate) fn validate_verification_retry(goal: &Goal) -> Result<()> {
         return Err(error("Goal is not blocked"));
     }
     crate::manager_coordinator::validate_execution_contract(goal)?;
-    if goal.proposal.tasks.iter().any(|task| {
-        !goal.execution.attempts.iter().any(|attempt| {
-            attempt.task_id == task.id && attempt.integrated && attempt.result_sha.is_some()
-        })
-    }) {
+    if !every_task_done(goal) {
         return Err(error("Goal has tasks that are not integrated"));
     }
     let publication = goal
@@ -318,6 +415,220 @@ pub(crate) fn reconcile(
     }
 }
 
+fn approved_evidence(
+    goal: &Goal,
+    revision: u64,
+) -> Result<(&manager::CorrectivePreview, &manager::EvidenceRequest)> {
+    match goal.approved(revision).map(|a| (a, &a.correction)) {
+        Some((approved, manager::Correction::Evidence(request))) => Ok((approved, request)),
+        _ => Err(error("evidence run has no approved evidence request")),
+    }
+}
+
+fn update_evidence(
+    cwd: &Path,
+    id: &str,
+    revision: u64,
+    change: impl FnOnce(&mut manager::EvidenceRun),
+) -> Result<()> {
+    manager::update_goal(cwd, id, |goal| {
+        let run = goal
+            .execution
+            .evidence_runs
+            .iter_mut()
+            .find(|run| run.revision == revision && run.outcome.is_none())
+            .ok_or_else(|| error("evidence run changed"))?;
+        change(run);
+        Ok(())
+    })
+}
+
+/// Run every approved check of one evidence request in a detached worktree at the
+/// approved tip. The durable `started` mark comes first, so a run found started again
+/// has an unknown outcome and is reported instead of replayed.
+fn gather_evidence(
+    cwd: &Path,
+    cancel: &crate::cancellation::CancellationToken,
+    goal: &Goal,
+    run: &manager::EvidenceRun,
+) -> Result<manager::EvidenceOutcome> {
+    use manager::EvidenceOutcome::{Resolved, Unresolved};
+    let id = goal.id.as_str();
+    if run.started {
+        return Ok(Unresolved(
+            "evidence run was interrupted before its outcome was saved".into(),
+        ));
+    }
+    let (approved, request) = approved_evidence(goal, run.revision)?;
+    let tip = approved.integrated_tip.as_str();
+    update_evidence(cwd, id, run.revision, |run| run.started = true)?;
+    let repo = anchor(cwd, goal)?;
+    let root = run
+        .worktree
+        .parent()
+        .ok_or_else(|| error("invalid verification directory"))?;
+    std::fs::create_dir_all(root)?;
+    manager_forge::run_effect(
+        &repo,
+        "git",
+        &[
+            "worktree".into(),
+            "add".into(),
+            "--detach".into(),
+            run.worktree
+                .to_str()
+                .ok_or_else(|| error("invalid worktree path"))?
+                .into(),
+            tip.into(),
+        ],
+        cancel,
+        id,
+        &GoalStatus::Active,
+    )
+    .map_err(error)?;
+    let reference = format!("refs/heads/cruise/goal/{id}");
+    for (index, check_id) in request.checks.iter().enumerate() {
+        let check = goal
+            .proposal
+            .checks
+            .iter()
+            .find(|check| check.id == *check_id)
+            .ok_or_else(|| error("approved evidence check is missing"))?;
+        let log_id = uuid::Uuid::new_v4();
+        let evidence = crate::manager_git::run_evidence_check(
+            crate::manager_git::VerificationCheck {
+                repo: &repo,
+                worktree: &run.worktree,
+                goal_ref: &reference,
+                approved_base: &goal.proposal.target_sha,
+                verified_tip: tip,
+                check_id,
+                argv: &check.argv,
+                stdout_log: &root.join(format!("{log_id}-{index}.stdout")),
+                stderr_log: &root.join(format!("{log_id}-{index}.stderr")),
+                cancel,
+            },
+            id,
+        )
+        .map_err(error)?;
+        let passed = evidence.passed();
+        update_evidence(cwd, id, run.revision, |run| run.checks.push(evidence))?;
+        if !passed {
+            return Ok(Unresolved(format!(
+                "check {check_id} failed or was interrupted"
+            )));
+        }
+    }
+    Ok(Resolved)
+}
+
+/// Evidence is adopted only for exactly what the owner approved: the same tip, contract
+/// and failed attempt, with a passing result of every approved check at that tip.
+fn evidence_holds(goal: &Goal, revision: u64) -> Result<()> {
+    let (approved, request) = approved_evidence(goal, revision)?;
+    let tip = approved.integrated_tip.as_str();
+    let attempt_unchanged = goal
+        .execution
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.task_id == request.task_id)
+        .max_by_key(|attempt| attempt.attempt)
+        .is_some_and(|attempt| {
+            attempt.attempt == request.attempt
+                && attempt.session_id == request.session_id
+                && !attempt.integrated
+                && attempt.result_sha.is_none()
+                && attempt.finalization_intent.is_none()
+                && attempt.integration_intent.is_none()
+                && !attempt.resume_pending
+                && !attempt.resume_starting
+        });
+    let checks_passed = goal
+        .execution
+        .evidence_runs
+        .iter()
+        .find(|run| run.revision == revision)
+        .is_some_and(|run| {
+            run.checks.len() == request.checks.len()
+                && run
+                    .checks
+                    .iter()
+                    .zip(&request.checks)
+                    .all(|(evidence, id)| {
+                        evidence.passed()
+                            && evidence.check_id == *id
+                            && evidence.verified_tip == tip
+                            && goal
+                                .proposal
+                                .checks
+                                .iter()
+                                .any(|check| check.id == *id && check.argv == evidence.argv)
+                    })
+        });
+    if goal.status != GoalStatus::Active
+        || goal.execution.integrated_tip.as_deref() != Some(tip)
+        || goal.contract_revision() != approved.contract_revision
+        || !attempt_unchanged
+        || !checks_passed
+    {
+        return Err(error(
+            "the Goal tip, contract or attempt changed, or a check result is missing",
+        ));
+    }
+    Ok(())
+}
+
+/// Run the pending approved evidence request of a Goal on a blocking worker. Its task is
+/// resolved only when every approved check passes at the approved tip and nothing the
+/// owner reviewed changed meanwhile. Any other end is recorded as unresolved and is never
+/// replayed: the task stays failed until the owner approves a new preview.
+pub(crate) fn run_evidence(
+    cwd: &Path,
+    id: &str,
+    lease: &crate::manager_coordinator::PublicationLease,
+) -> Result<()> {
+    use manager::EvidenceOutcome::{Resolved, Unresolved};
+    if !lease.owns(cwd, id)? {
+        return Err(error("publication lease belongs to a different Goal"));
+    }
+    let goal = load(cwd, id)?;
+    let Some(run) = goal
+        .execution
+        .evidence_runs
+        .iter()
+        .find(|run| run.outcome.is_none())
+    else {
+        return Ok(());
+    };
+    let revision = run.revision;
+    let gathered = gather_evidence(cwd, &lease.token, &goal, run)
+        .unwrap_or_else(|cause| Unresolved(cause.to_string()));
+    // Integration and resume admission hold the same gate, so for them the comparison
+    // and the resolution below are one step.
+    let _guard = crate::manager_coordinator::CONTROL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    manager::update_goal(cwd, id, |saved| {
+        let outcome = match (gathered, evidence_holds(saved, revision)) {
+            (Resolved, Err(cause)) => Unresolved(format!("evidence was not adopted: {cause}")),
+            (outcome, _) => outcome,
+        };
+        if outcome == Resolved {
+            crate::manager_coordinator::clear_failed_child_reason(saved, &run.task_id);
+        }
+        saved
+            .execution
+            .evidence_runs
+            .iter_mut()
+            .find(|run| run.revision == revision && run.outcome.is_none())
+            .ok_or_else(|| error("evidence run changed"))?
+            .outcome = Some(outcome);
+        Ok(())
+    })?;
+    crate::manager_coordinator::wake();
+    Ok(())
+}
+
 struct Reconciliation<'a> {
     cwd: &'a Path,
     id: &'a str,
@@ -345,12 +656,7 @@ fn prepare_reconciliation<'a>(
         return Ok(None);
     }
     crate::manager_coordinator::validate_execution_contract(&goal)?;
-    if !goal.proposal.tasks.iter().all(|t| {
-        goal.execution
-            .attempts
-            .iter()
-            .any(|a| a.task_id == t.id && a.integrated)
-    }) {
+    if !goal.proposal.tasks.iter().all(|t| goal.task_done(&t.id)) {
         return Ok(None);
     }
     let repo = anchor(cwd, &goal)?;
@@ -431,6 +737,7 @@ fn prepare_worktree(context: &Reconciliation<'_>) -> Result<Option<Publication>>
             forge_kind: ctx.kind,
             forge_host: ctx.host.clone(),
             forge_repository: ctx.repository.clone(),
+            contract_revision: goal.contract_revision(),
         };
         save(cwd, id, p.clone(), GoalStatus::Verifying, None)?;
         // Worktree creation is recoverable only by inspecting this exact path.
@@ -449,6 +756,7 @@ fn prepare_worktree(context: &Reconciliation<'_>) -> Result<Option<Publication>>
             ],
             cancel,
             id,
+            &GoalStatus::Verifying,
         ) {
             if cancel.is_cancelled() {
                 return Ok(None);
@@ -491,6 +799,7 @@ fn validate_publication_intent(
         || p.forge_kind != ctx.kind
         || p.forge_host != ctx.host
         || p.forge_repository != ctx.repository
+        || p.contract_revision != goal.contract_revision()
     {
         return Err(error(
             "publication intent or forge identity does not match Goal",
@@ -772,7 +1081,7 @@ fn finish_publication(context: &Reconciliation<'_>, mut p: Publication) -> Resul
                 source: &p.branch,
                 target: &goal.proposal.target_branch,
                 title: &goal.proposal.objective,
-                body: "Created by Cruise Manager. Merge manually after review.",
+                body: &publication_body(goal),
             },
             cancel,
             id,
@@ -881,6 +1190,7 @@ mod tests {
             forge_kind: crate::forge::ForgeKind::GitHub,
             forge_host: "github.com".into(),
             forge_repository: "example/project".into(),
+            contract_revision: 0,
         };
         let validated = validate_publication_intent(&context, publication.clone())?
             .ok_or("valid intent unexpectedly stopped")?;

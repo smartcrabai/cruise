@@ -98,7 +98,8 @@ pub(crate) enum Action {
     PreviewCorrective {
         goal_id: String,
         expected_tip: String,
-        task: crate::manager::Task,
+        #[serde(flatten)]
+        request: crate::manager_coordinator::corrections::CorrectionRequest,
     },
     Approve {
         proposal_id: String,
@@ -174,12 +175,13 @@ pub(crate) fn dispatch_action(
             Action::PreviewCorrective {
                 goal_id,
                 expected_tip,
-                task,
-            } => serde_json::to_value(manager::preview_corrective(
+                request,
+            } => serde_json::to_value(coordinator::corrections::preview(
+                &state.application,
                 cwd,
                 &goal_id,
                 &expected_tip,
-                task,
+                request,
             )?)?,
             Action::Approve {
                 proposal_id,
@@ -194,7 +196,13 @@ pub(crate) fn dispatch_action(
                 preview_id,
                 revision,
             } => {
-                let goal = manager::approve_corrective(cwd, &goal_id, &preview_id, revision)?;
+                let goal = coordinator::corrections::approve(
+                    &state.application,
+                    cwd,
+                    &goal_id,
+                    &preview_id,
+                    revision,
+                )?;
                 coordinator::wake();
                 serde_json::to_value(goal)?
             }

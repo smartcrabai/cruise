@@ -4,7 +4,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::application::{OptionChoiceKind, PendingPrompt, PendingPromptKind};
-use crate::cli::{ManagerApprovalArgs, ManagerArgs, ManagerCommand};
+use crate::cli::{ManagerApprovalArgs, ManagerArgs, ManagerCommand, ManagerCorrectiveArgs};
 use crate::daemon::client::DaemonClient;
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
@@ -95,13 +95,10 @@ pub(crate) async fn run(args: ManagerArgs) -> Result<()> {
             print_goal_accepted(&client, cwd, &goal).await;
             return Ok(());
         }
-        ManagerCommand::Corrective {
-            goal,
-            task,
-            instructions,
-        } => {
+        ManagerCommand::Corrective(args) => {
             let snapshot = client.manager_snapshot(cwd).await?;
-            let action = preview_corrective(&snapshot, &goal, &task, instructions, tty)?;
+            let goal = args.goal.clone();
+            let action = preview_corrective(&snapshot, args, tty)?;
             let preview = send(&client, cwd, action).await?;
             println!(
                 "{}\n{}",
@@ -299,29 +296,35 @@ fn find_goal<'a>(snapshot: &'a Value, goal: &str) -> Result<&'a Value> {
         .ok_or_else(|| error("corrective_unknown_goal"))
 }
 
-fn preview_corrective(
-    snapshot: &Value,
-    goal_id: &str,
-    task_id: &str,
-    instructions: Option<String>,
-    tty: bool,
-) -> Result<Value> {
-    let goal = find_goal(snapshot, goal_id)?;
+fn preview_corrective(snapshot: &Value, args: ManagerCorrectiveArgs, tty: bool) -> Result<Value> {
+    let goal = find_goal(snapshot, &args.goal)?;
     let tip = goal["execution"]["integrated_tip"]
         .as_str()
         .ok_or_else(|| error("corrective_missing_tip"))?;
-    println!(
-        "{}\n{}",
-        text("corrective_review"),
-        serde_json::to_string_pretty(goal)?
-    );
-    let instructions = read_input(instructions, tty, "corrective_instructions")?;
-    if instructions.trim().is_empty() {
-        return Err(error("corrective_empty"));
+    let mut action = json!({"type":"preview_corrective", "goal_id":args.goal, "expected_tip":tip});
+    if let Some(file) = args.amend {
+        action["amendment"] = serde_json::from_str(&std::fs::read_to_string(file)?)?;
+    } else if args.evidence {
+        action["evidence"] =
+            json!({"task_id":args.task, "criteria":args.criterion, "paths":args.path});
+    } else {
+        println!(
+            "{}\n{}",
+            text("corrective_review"),
+            serde_json::to_string_pretty(goal)?
+        );
+        let instructions = read_input(args.instructions, tty, "corrective_instructions")?;
+        if instructions.trim().is_empty() {
+            return Err(error("corrective_empty"));
+        }
+        if args.resume {
+            action["resume"] = json!({"task_id":args.task, "instructions":instructions});
+        } else {
+            action["task"] =
+                json!({"id":args.task, "instructions":instructions, "dependencies":[]});
+        }
     }
-    Ok(
-        json!({"type":"preview_corrective", "goal_id":goal_id, "expected_tip":tip, "task":{"id":task_id, "instructions":instructions, "dependencies":[]}}),
-    )
+    Ok(action)
 }
 
 fn review_revision<'a>(

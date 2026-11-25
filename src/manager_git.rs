@@ -2,6 +2,7 @@
 //! invoking `apply_integration`, and save verification results before publication.
 //! None of these operations checks out or modifies the user's worktree.
 
+use crate::manager::GoalStatus;
 use command_group::CommandGroup;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -360,6 +361,17 @@ pub fn validate_verification_state(
     approved_base: &str,
     verified_tip: &str,
 ) -> Result<(), String> {
+    validate_state(repo, worktree, goal_ref, approved_base, verified_tip, true)
+}
+
+fn validate_state(
+    repo: &Path,
+    worktree: &Path,
+    goal_ref: &str,
+    approved_base: &str,
+    verified_tip: &str,
+    require_change: bool,
+) -> Result<(), String> {
     validate_ref(repo, goal_ref)?;
     let common_dir = |path: &Path| -> Result<std::path::PathBuf, String> {
         let dir = successful(
@@ -415,7 +427,7 @@ pub fn validate_verification_state(
         git(repo, &["rev-parse", &format!("{tip}^{{tree}}")])?,
         "resolve verified tree",
     )?;
-    if base_tree == tip_tree {
+    if require_change && base_tree == tip_tree {
         return Err("Goal has no net change from approved base".into());
     }
     if !ancestor(repo, &base, &tip)? {
@@ -469,19 +481,29 @@ pub struct VerificationCheck<'a> {
 ///
 /// Returns an error if state validation, log creation, or check execution fails.
 pub fn run_verification_check(check: VerificationCheck<'_>) -> Result<CheckEvidence, String> {
-    run_verification_check_inner(check, None)
+    run_verification_check_inner(check, None, true)
 }
 
 pub(crate) fn run_verification_check_guarded(
     check: VerificationCheck<'_>,
     goal_id: &str,
 ) -> Result<CheckEvidence, String> {
-    run_verification_check_inner(check, Some(goal_id))
+    run_verification_check_inner(check, Some((goal_id, &GoalStatus::Verifying)), true)
+}
+
+/// Run one approved check as evidence for a single task while its Goal stays active.
+/// The Goal may have no net change yet; the final verification still requires one.
+pub(crate) fn run_evidence_check(
+    check: VerificationCheck<'_>,
+    goal_id: &str,
+) -> Result<CheckEvidence, String> {
+    run_verification_check_inner(check, Some((goal_id, &GoalStatus::Active)), false)
 }
 
 fn run_verification_check_inner(
     check: VerificationCheck<'_>,
-    goal_id: Option<&str>,
+    gate: Option<(&str, &GoalStatus)>,
+    require_change: bool,
 ) -> Result<CheckEvidence, String> {
     use std::process::Stdio;
 
@@ -503,7 +525,17 @@ fn run_verification_check_inner(
     if cancel.is_cancelled() {
         return Err("verification cancelled before check started".into());
     }
-    validate_verification_state(repo, worktree, goal_ref, approved_base, verified_tip)?;
+    let validate = || {
+        validate_state(
+            repo,
+            worktree,
+            goal_ref,
+            approved_base,
+            verified_tip,
+            require_change,
+        )
+    };
+    validate()?;
     let open_log = |path: &Path| {
         std::fs::OpenOptions::new()
             .write(true)
@@ -520,9 +552,10 @@ fn run_verification_check_inner(
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
-    let gate = goal_id
-        .map(|id| {
-            crate::manager_publication::effect_guard(repo, id, cancel).map_err(|e| e.to_string())
+    let gate = gate
+        .map(|(id, status)| {
+            crate::manager_publication::effect_guard(repo, id, cancel, status)
+                .map_err(|e| e.to_string())
         })
         .transpose()?;
     let mut child = command
@@ -548,8 +581,7 @@ fn run_verification_check_inner(
         }
     };
     cancelled |= cancel.is_cancelled();
-    let state_error =
-        validate_verification_state(repo, worktree, goal_ref, approved_base, verified_tip).err();
+    let state_error = validate().err();
     Ok(CheckEvidence {
         check_id: check_id.to_owned(),
         verified_tip: verified_tip.to_owned(),

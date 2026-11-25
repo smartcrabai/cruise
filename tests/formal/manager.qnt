@@ -1,6 +1,8 @@
 // Bounded abstraction of Manager approval, dependency scheduling, verification,
 // corrective approval and publication. Task 1 depends on task 0; task 2 is the
 // single corrective task. Atomic actions abstract durable writer/control locks.
+// `integrated` stands for a task that is done: its child was integrated, or approved
+// evidence resolved it (manager_corrections.qnt and manager.als keep the two apart).
 // Does not model filesystem, Git, forge failures, child task retries, integrated
 // tip changes, or liveness.
 // Production: manager::approve, manager::preview_corrective,
