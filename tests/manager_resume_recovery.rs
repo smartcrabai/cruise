@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 use base64::Engine as _;
+use cruise::manager::{Goal, GoalStatus};
 use cruise::session::{ManagedChildOwner, SessionManager, SessionPhase, SessionState};
 use cruise::session_config::SessionConfigRef;
 use serde_json::{Value, json};
@@ -976,5 +977,245 @@ async fn invalid_child_plan_records_durable_resume_failure_without_duplicate_att
         1
     );
     assert_eq!(recovered["execution"]["attempts"][0]["session_id"], "child");
+    assert!(!fixture.marker.exists());
+}
+
+const STALE_RESERVATION: &str = "Manager dispatch requires attention: interrupted Manager reservation no longer matches Goal tip";
+
+fn edit_goal(fixture: &Fixture, edit: impl FnOnce(&mut Value)) {
+    let mut record: Value = serde_json::from_slice(
+        &fs::read(&fixture.record).unwrap_or_else(|error| panic!("read Goal: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("parse Goal: {error}"));
+    edit(&mut record["goals"][0]);
+    // Renamed into place: a running daemon must never read a partial record.
+    let staged = fixture.record.with_extension("staged");
+    fs::write(
+        &staged,
+        serde_json::to_vec_pretty(&record).unwrap_or_else(|error| panic!("encode Goal: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("write Goal: {error}"));
+    fs::rename(&staged, &fixture.record).unwrap_or_else(|error| panic!("publish Goal: {error}"));
+}
+
+/// Move the Goal ref past the fixture base, as integrating another child does.
+fn advance_goal_tip(fixture: &Fixture) -> String {
+    fs::write(fixture.repo.join("file"), "goal change\n")
+        .unwrap_or_else(|error| panic!("change Goal file: {error}"));
+    git(&fixture.repo, &["commit", "-qam", "goal change"]);
+    let tip = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    git(
+        &fixture.repo,
+        &["update-ref", "refs/heads/cruise/goal/g", &tip],
+    );
+    tip
+}
+
+/// Reserve attempt 2 at the fixture base, then leave the Goal tip ahead of that pin.
+fn seed_stale_reservation(fixture: &Fixture) -> String {
+    let base = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let tip = advance_goal_tip(fixture);
+    edit_goal(fixture, |goal| {
+        goal["execution"]["integrated_tip"] = json!(tip);
+        goal["execution"]["attempts"]
+            .as_array_mut()
+            .unwrap_or_else(|| panic!("expected attempts"))
+            .push(json!({"task_id":"task","attempt":2,"session_id":"retry","base_sha":base,
+                "launch_started":false,"result_sha":null,"integrated":false,"integration_intent":null}));
+    });
+    tip
+}
+
+fn retry_task(fixture: &Fixture) -> Output {
+    cli_in(
+        fixture.home.path(),
+        &fixture.repo,
+        &["manager", "retry", "g", "task"],
+    )
+}
+
+async fn wait_for_single_launch(fixture: &Fixture) {
+    eventually(|| {
+        let goal = fixture.goal();
+        assert_ne!(goal["status"], "blocked", "{goal}");
+        fixture.marker.exists()
+    })
+    .await;
+    assert_eq!(
+        fs::read_to_string(&fixture.marker)
+            .unwrap_or_else(|error| panic!("read launch marker: {error}"))
+            .lines()
+            .collect::<Vec<_>>(),
+        vec!["started"]
+    );
+}
+
+#[tokio::test]
+async fn retry_reservation_follows_the_tip_when_a_sibling_integrates_first() {
+    let fixture = Fixture::new("blocked", false, false);
+    let base = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    // Attempt 1 completed, but its result conflicts with the Goal tip.
+    let mut child = fixture
+        .sessions
+        .load("child")
+        .unwrap_or_else(|error| panic!("load child: {error}"));
+    let worktree = child
+        .worktree_path
+        .clone()
+        .unwrap_or_else(|| panic!("expected worktree"));
+    fs::write(worktree.join("file"), "child result\n")
+        .unwrap_or_else(|error| panic!("write child result: {error}"));
+    git(&worktree, &["commit", "-qam", "child result"]);
+    let result = git(&worktree, &["rev-parse", "HEAD"]);
+    child.phase = SessionPhase::Completed;
+    fixture
+        .sessions
+        .save(&child)
+        .unwrap_or_else(|error| panic!("save child: {error}"));
+    let conflicting_tip = advance_goal_tip(&fixture);
+    // A sibling completed while the Goal was blocked, so it is not integrated yet.
+    // Its session reuses the fixture child's record with its own owner and worktree.
+    let sibling = fixture.sessions.worktrees_dir().join("other");
+    git(
+        &fixture.repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "cruise/other",
+            sibling
+                .to_str()
+                .unwrap_or_else(|| panic!("expected UTF-8 path")),
+            &base,
+        ],
+    );
+    fs::write(sibling.join("other"), "other result\n")
+        .unwrap_or_else(|error| panic!("write sibling result: {error}"));
+    let mut other = child;
+    other.id = "other".into();
+    other.managed_child = Some(ManagedChildOwner {
+        goal_id: "g".into(),
+        task_id: "other".into(),
+        attempt: 1,
+        revision: 1,
+        base_sha: base.clone(),
+    });
+    other.worktree_path = Some(sibling);
+    other.worktree_branch = Some("cruise/other".into());
+    fixture
+        .sessions
+        .create(&other)
+        .unwrap_or_else(|error| panic!("create sibling: {error}"));
+    edit_goal(&fixture, |goal| {
+        goal["reason"] = json!("Child child integration requires attention: fixture conflict");
+        goal["proposal"]["tasks"]
+            .as_array_mut()
+            .unwrap_or_else(|| panic!("expected tasks"))
+            .push(json!({"id":"other","instructions":"other work","dependencies":[]}));
+        goal["execution"]["integrated_tip"] = json!(conflicting_tip);
+        goal["execution"]["attempts"][0]["result_sha"] = json!(result);
+        goal["execution"]["attempts"]
+            .as_array_mut()
+            .unwrap_or_else(|| panic!("expected attempts"))
+            .push(json!({"task_id":"other","attempt":1,"session_id":"other","base_sha":base,
+                "launch_started":true,"result_sha":null,"integrated":false,"integration_intent":null}));
+    });
+    fixture.start().await;
+
+    let output = retry_task(&fixture);
+    assert!(output.status.success(), "manager retry: {output:?}");
+    wait_for_single_launch(&fixture).await;
+
+    let goal = fixture.goal();
+    let attempts = goal["execution"]["attempts"]
+        .as_array()
+        .unwrap_or_else(|| panic!("expected attempts"));
+    assert_eq!(attempts.len(), 3, "{goal}");
+    assert_eq!(attempts[1]["integrated"], true, "{goal}");
+    let tip = goal["execution"]["integrated_tip"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected Goal tip"));
+    assert_ne!(tip, conflicting_tip, "{goal}");
+    assert_eq!(attempts[2]["base_sha"], tip, "{goal}");
+    let retried = fixture.sessions.worktrees_dir().join(
+        attempts[2]["session_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected retry session")),
+    );
+    assert_eq!(git(&retried, &["rev-parse", "HEAD"]), tip);
+}
+
+#[tokio::test]
+async fn retry_restarts_a_goal_blocked_by_a_stale_unpublished_reservation() {
+    let fixture = Fixture::new("blocked", false, false);
+    let tip = seed_stale_reservation(&fixture);
+    edit_goal(&fixture, |goal| goal["reason"] = json!(STALE_RESERVATION));
+    let mut expected: Goal = serde_json::from_value(fixture.goal())
+        .unwrap_or_else(|error| panic!("parse Goal: {error}"));
+    fixture.start().await;
+
+    let output = retry_task(&fixture);
+    assert!(output.status.success(), "manager retry: {output:?}");
+    // Pending or already running: a repeated retry must not add another launch.
+    assert!(!retry_task(&fixture).status.success());
+    wait_for_single_launch(&fixture).await;
+
+    expected.status = GoalStatus::Active;
+    expected.reason = None;
+    expected.execution.attempts[1].base_sha.clone_from(&tip);
+    expected.execution.attempts[1].launch_started = Some(true);
+    let actual: Goal = serde_json::from_value(fixture.goal())
+        .unwrap_or_else(|error| panic!("parse Goal: {error}"));
+    assert_eq!(json!(actual), json!(expected));
+    let owner = fixture
+        .sessions
+        .load("retry")
+        .unwrap_or_else(|error| panic!("load retried child: {error}"))
+        .managed_child
+        .unwrap_or_else(|| panic!("expected Manager owner"));
+    assert_eq!(owner.base_sha, tip);
+    assert_eq!(
+        git(
+            &fixture.sessions.worktrees_dir().join("retry"),
+            &["rev-parse", "HEAD"]
+        ),
+        tip
+    );
+}
+
+#[tokio::test]
+async fn stale_reservation_that_may_have_started_stays_blocked() {
+    let fixture = Fixture::new("active", false, false);
+    let base = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    seed_stale_reservation(&fixture);
+    // A session directory published under the old pin may belong to a started child.
+    let session = fixture.sessions.sessions_dir().join("retry");
+    fs::create_dir(&session).unwrap_or_else(|error| panic!("publish reservation: {error}"));
+    fs::write(
+        session.join("manager-owner.json"),
+        json!({"goal_id":"g","task_id":"task","attempt":2,"revision":1,"base_sha":base})
+            .to_string(),
+    )
+    .unwrap_or_else(|error| panic!("write owner marker: {error}"));
+    fixture.start().await;
+    eventually(|| fixture.goal()["status"] == "blocked").await;
+    assert_eq!(fixture.goal()["reason"], STALE_RESERVATION);
+
+    for launch_started in [json!(false), json!(true), Value::Null] {
+        if launch_started != json!(false) {
+            // Without the directory, only the recorded launch state protects the attempt.
+            let _ = fs::remove_dir_all(&session);
+        }
+        edit_goal(&fixture, |goal| {
+            goal["execution"]["attempts"][1]["launch_started"] = launch_started.clone();
+        });
+        let before = fixture.goal();
+        assert_eq!(before["execution"]["attempts"][1]["base_sha"], base);
+        assert!(
+            !retry_task(&fixture).status.success(),
+            "launch_started={launch_started}"
+        );
+        assert_eq!(fixture.goal(), before);
+    }
     assert!(!fixture.marker.exists());
 }

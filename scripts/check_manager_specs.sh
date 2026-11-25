@@ -33,16 +33,27 @@ run_check quint-version "$Q" --version
 run_check rust-version rustc +1.99.1 --version
 run_check alloy-version java -jar target/formal-tools/alloy-6.2.0.jar version
 run_check alloy-exec-help java -jar target/formal-tools/alloy-6.2.0.jar help exec
+require_tests() {
+  local log=$1 test
+  shift
+  for test in "$@"; do
+    if ! grep -Fq "ok $test passed" "$log"; then
+      echo "Missing Quint test result: $test" | tee -a "$RUN/results.log"
+      status=1
+    fi
+  done
+}
 run_check quint-typecheck "$Q" typecheck "$MODEL"
 run_check quint-test "$Q" test "$MODEL" --backend typescript --seed 20261120
-for test in approvalAuthorizesAsynchronousSchedulingTest staleApprovalTest dependencyAndPublicationTest pauseResumeTest retryVerificationTest correctiveApprovalTest staleCorrectiveTest correctivePreviewDoesNotAuthorizeTest discardedCorrectiveTest freshCorrectiveAfterRetryTest rejectedRetryPreservesPreviewTest; do
-  if ! grep -Fq "ok $test passed" "$RUN/quint-test.log"; then
-    echo "Missing Quint test result: $test" | tee -a "$RUN/results.log"
-    status=1
-  fi
-done
+require_tests "$RUN/quint-test.log" approvalAuthorizesAsynchronousSchedulingTest staleApprovalTest dependencyAndPublicationTest pauseResumeTest retryVerificationTest correctiveApprovalTest staleCorrectiveTest correctivePreviewDoesNotAuthorizeTest discardedCorrectiveTest freshCorrectiveAfterRetryTest rejectedRetryPreservesPreviewTest
 run_check quint-simulation "$Q" run --seed 20261120 --max-samples 1000 --max-steps 20 --backend typescript --invariant safety "$MODEL"
 run_check quint-verify node scripts/formal/verify_quint.cjs "$Q" "$MODEL" manager 16 "$RUN/counterexample.itf.json"
+RESERVATION=tests/formal/manager_reservation.qnt
+run_check reservation-typecheck "$Q" typecheck "$RESERVATION"
+run_check reservation-test "$Q" test "$RESERVATION" --backend typescript --seed 20261120
+require_tests "$RUN/reservation-test.log" siblingIntegrationRepinsTest legacyBlockRecoversTest recoveredReservationLaunchesOnceTest retryAfterLaunchIsRejectedTest retryAfterLaunchDoesNotReserveTest publishedStaleStaysBlockedTest publishedStaleDoesNotReactivateTest restartAfterRepinTest restartAfterPublishTest
+run_check reservation-simulation "$Q" run --seed 20261120 --max-samples 1000 --max-steps 20 --backend typescript --invariant safety "$RESERVATION"
+run_check reservation-verify node scripts/formal/verify_quint.cjs "$Q" "$RESERVATION" manager_reservation 12 "$RUN/reservation-counterexample.itf.json"
 run_check alloy java -jar target/formal-tools/alloy-6.2.0.jar exec --command '*' --solver sat4j --type json --output "$RUN/alloy" tests/formal/manager.als
 run_check alloy-receipt node scripts/formal/check_alloy_receipt.cjs tests/formal/manager.als "$RUN/alloy/receipt.json"
 run_check receipt-validator-tests node --test scripts/formal/check_alloy_receipt.test.cjs
