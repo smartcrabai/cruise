@@ -1,0 +1,22 @@
+{
+  "id": "20261126173210341_2e1a3fcf540d4542b75e681b23708c42",
+  "choice": "Fast path",
+  "chosen": "fast",
+  "steps": [
+    {
+      "name": "01-planned",
+      "url": "/sessions/20261126173210341_2e1a3fcf540d4542b75e681b23708c42",
+      "phase": "Planned"
+    },
+    {
+      "name": "02-option",
+      "url": "/sessions/20261126173210341_2e1a3fcf540d4542b75e681b23708c42",
+      "phase": "Running"
+    },
+    {
+      "name": "03-completed",
+      "url": "/sessions/20261126173210341_2e1a3fcf540d4542b75e681b23708c42",
+      "phase": "Completed"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+config: /private/var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/verify-cruise.8IFw5q/repo/../choose.yaml
+
++- plan.md ----------------------------------------------------------------------------------------+
+| pick a path                                                                                      |
++--------------------------------------------------------------------------------------------------+
+? Action:  
+> Approve
+  Fix
+  Ask
+  Verify
+  Execute now
+  Publish as Issue
+[↑↓ to move, enter to select, type to filter]

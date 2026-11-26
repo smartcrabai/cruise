@@ -1,0 +1,10 @@
+config: /private/var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/verify-cruise.8IFw5q/repo/../choose.yaml
+
++- plan.md ----------------------------------------------------------------------------------------+
+| pick a path                                                                                      |
++--------------------------------------------------------------------------------------------------+
+> Action: Approve
+> Steps to skip (Space to toggle, Enter to confirm): 
+
+v Session 20261126173209427_41263c0864b748feb1bf7d0ab9911229 created.
+  Run with: cruise run 20261126173209427_41263c0864b748feb1bf7d0ab9911229

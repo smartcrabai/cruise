@@ -1,0 +1,17 @@
+{
+  "argv": [
+    "cruise",
+    "exec",
+    "--config",
+    "../run-session.yaml",
+    "hello from verify-cruise"
+  ],
+  "cols": 120,
+  "completed": true,
+  "error": null,
+  "exit_code": 0,
+  "rows": 40,
+  "snapshots": [
+    "01-final"
+  ]
+}

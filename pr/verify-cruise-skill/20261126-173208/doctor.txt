@@ -1,0 +1,8 @@
+ok    isolated HOME $ROOT/home
+ok    daemon running at http://127.0.0.1:56997/
+ok    daemon PID 34698 was started by this run
+ok    daemon executable is this checkout's build
+ok    client and daemon versions match
+ok    source HEAD 8d3339fbbfd3ceed7dd7cd2232d4b83c7cb05bdb unchanged since launch
+ok    no source change since the launch build
+ok    fixture repository on branch main

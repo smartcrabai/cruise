@@ -1,0 +1,11 @@
+-> current branch: /private/var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/verify-cruise.8IFw5q/repo
+
+> write
+  v 0.0s
+  -> write -> show [sequential] (edge 1/3)
+
+> show
+  hello from verify-cruise
+  v 0.0s
+
+v workflow complete (2 run, 0 skipped, 0 failed) [0.0s]

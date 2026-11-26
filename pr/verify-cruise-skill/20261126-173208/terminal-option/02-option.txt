@@ -1,0 +1,12 @@
+> Where should cruise execute? Use current branch
+-> current branch: /private/var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/verify-cruise.8IFw5q/repo
+
+> choose
+
++- Plan -------------------------------------------------------------------------------------------+
+| Select an option                                                                                 |
++--------------------------------------------------------------------------------------------------+
+? Select an option  
+> Fast path
+  Alternate path
+[↑↓ to move, enter to select, type to filter]

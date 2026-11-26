@@ -1,0 +1,4 @@
+? Where should cruise execute?  
+> Create worktree (new branch)
+  Use current branch
+[↑↓ to move, enter to select, type to filter]

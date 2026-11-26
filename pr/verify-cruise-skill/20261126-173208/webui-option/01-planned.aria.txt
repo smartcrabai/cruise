@@ -1,0 +1,58 @@
+- complementary:
+  - heading "Sessions" [level=2]
+  - button "Clean"
+  - button "Run all pending sessions": Run All
+  - button "+ New"
+  - button "Settings": ⚙
+  - link "Manager":
+    - /url: /manager
+  - paragraph
+  - link "20261126173209427_41263c0864b748feb1bf7d0ab9911229 Completed pick a path repo 11/26/26 17:32":
+    - /url: /sessions/20261126173209427_41263c0864b748feb1bf7d0ab9911229
+    - text: 20261126173209427_41263c0864b748feb1bf7d0ab9911229 Completed
+    - paragraph: pick a path
+    - text: repo 11/26/26 17:32
+  - link "20261126173210341_2e1a3fcf540d4542b75e681b23708c42 Planned pick in the browser repo 11/26/26 17:32":
+    - /url: /sessions/20261126173210341_2e1a3fcf540d4542b75e681b23708c42
+    - text: 20261126173210341_2e1a3fcf540d4542b75e681b23708c42 Planned
+    - paragraph: pick in the browser
+    - text: repo 11/26/26 17:32
+  - text: Language
+  - combobox "Language":
+    - option "English" [selected]
+    - option "简体中文"
+    - option "Español"
+    - option "Français"
+    - option "Português (Brasil)"
+    - option "日本語"
+    - option "한국어"
+  - text: v0.3.3
+- separator
+- main:
+  - heading "pick in the browser" [level=2]
+  - text: Planned
+  - button "Fix"
+  - button "Ask"
+  - button "Verify"
+  - button "Publish as Issue"
+  - button "Create worktree (new branch)"
+  - button "Run on current branch"
+  - button "Delete"
+  - button "Settings"
+  - tablist:
+    - tab "Info" [selected]
+    - tab "Graph"
+    - tab "Plan"
+    - tab "Log"
+    - tab "Diff"
+  - tabpanel:
+    - term: Pending instructions
+    - definition: "0"
+    - term: Config
+    - definition: /private/var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/verify-cruise.8IFw5q/repo/../choose.yaml
+    - term: Flags
+    - definition: None
+    - term: Base dir
+    - definition: /private/var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/verify-cruise.8IFw5q/repo
+    - term: Created
+    - definition: 11/26/26 17:32
