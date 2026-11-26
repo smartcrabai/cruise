@@ -27,6 +27,8 @@ cruise daemon serve
 The daemon registry and log are in `$XDG_STATE_HOME/cruise/daemon/` (normally `~/.local/state/cruise/daemon/`): `instance.json` is mode `0600` and contains a random API token, and `daemon.log` contains daemon logs. Keep this directory private. There is no boot-time service installation and no idle auto-exit; the daemon exits when its registry record is removed. The former `cruise webui start|stop|restart|status` commands are removed; use `cruise daemon ...`.
 Detached daemons check `daemon.log` every 60 seconds. Above 5 MiB, the current log replaces `daemon.log.1` and the live log is truncated; only one rotated generation is kept.
 
+If `cruise manager propose` fails to parse JSON, the daemon logs `invalid JSON response shape` with the trimmed selected reply's byte length, fixed edge categories, and whether it contains a backtick or tilde fence marker. The diagnostic records no reply text and does not change the turn's error or saved proposal.
+
 When upgrading from the v0.3.0 detached WebUI, daemon start, restart, serve, and client autostart refuse while its server is live. Run `cruise daemon stop` first; it also stops the legacy server, cancelling its active work so sessions become `Suspended` and can be resumed with `cruise run <id>`. `cruise daemon status` reports a live legacy server. Dead or stale legacy records are removed when the daemon starts.
 
 The daemon also refuses (HTTP 409, CLI exit 1, state unchanged) to run or plan a session that another cruise process is still executing as its recorded runner, such as a v0.3.0 `cruise run` that was in progress when you upgraded. v0.3.0 background planning workers record no runner and cannot be detected, so let background plans started before the upgrade finish first.

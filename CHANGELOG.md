@@ -50,6 +50,7 @@
 - Add `cruise daemon start|stop|restart|status|serve` and `CRUISE_DAEMON_PORT` for resident daemon lifecycle and port configuration.
 - Start Docker images as a foreground daemon on port 8484 by default, and document long-lived service-container use.
 - Rotate detached `daemon.log` files above 5 MiB into a single `daemon.log.1` generation.
+- Log only the selected reply's shape when `cruise manager propose` fails to parse JSON; proposal handling is unchanged.
 - Add locale selection and translations for English, Simplified Chinese, Spanish, French, Brazilian Portuguese, Japanese, and Korean across the CLI and WebUI.
 - Add the bounded `plan_revision` Quint/Alloy specification with production Gherkin and negative controls (`scripts/check_plan_revision_specs.sh`) covering planning-input delivery, client action parity, and phase preservation.
 - Add best-effort client-side Herdr lifecycle reporting over OSC 7501 for CLI `plan`/`run`/`exec` (including Run/Resume from `cruise list`), with fully configured classic Herdr taking precedence. Only `cruise list` browsing/action-selection menus and WebUI daemon sessions are excluded.
