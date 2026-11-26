@@ -1,9 +1,14 @@
 export default function OptionDialog(props) {
   return (
     <div id={`dialog-${props.requestId}`} class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-      <div role="dialog" aria-modal="true" class="bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg p-6 max-w-lg w-full max-h-full overflow-y-auto space-y-4">
+      <div role="dialog" aria-modal="true" class={`bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg p-6 w-full max-h-full overflow-y-auto space-y-4 ${props.imageUrl ? "max-w-4xl" : "max-w-lg"}`}>
         <h2 class="text-gray-900 dark:text-gray-100 font-semibold text-lg">{props.sessionTitle}</h2>
         <p class="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap">{props.prompt}</p>
+        {props.imageUrl && (
+          <a href={props.imageUrl} target="_blank" rel="noopener" class="block rounded border border-gray-300 dark:border-gray-700 bg-white">
+            <img src={props.imageUrl} alt="Quint state and transition diagram" class="mx-auto max-h-[50vh] max-w-full object-contain" />
+          </a>
+        )}
         <div class="space-y-3">
           {props.choices.map(choice => <button type="button" class="w-full px-4 py-2 bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200 rounded text-sm hover:bg-gray-300 dark:hover:bg-gray-600 text-left" hx-post={props.submitUrl} hx-vals={choice.vals} hx-swap="none">{choice.label}</button>)}
         </div>

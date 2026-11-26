@@ -8,7 +8,8 @@ flags:
   after_pr:
     description: Run pull request readiness, synchronization, and CI follow-up steps
   formal_methods:
-    description: Add and execute repository-grounded Quint, Alloy, and Gherkin specifications
+    description: Approve a Quint model before implementation and verify it before publication
+    quint_review: true
   merge:
     description: Run after-PR follow-up and perform a host-managed squash merge
 
@@ -538,7 +539,7 @@ steps:
     timeout: 20m
     output_file: advisor/implementation.md
     if:
-      fail: formal-methods
+      fail: e2e-baseline
     prompt: |-
       Review the implementation once and report only. Use read and search tools only; no shell, writes, or user questions.
 
@@ -571,36 +572,6 @@ steps:
       If it says `NO FINDINGS`, change nothing. Otherwise verify each finding against the current code and {plan}. Apply only confirmed defects within the approved plan's scope, using the smallest complete change. Never weaken tests to fit the implementation. Run the build and relevant tests and report the commands and results.
 
       Output one line per ID: `applied` with evidence or `declined` with the reason. This is the only pass; do not request another review or ask the user.
-  formal-methods:
-    flag: formal_methods
-    prompt: |-
-      Add executable formal specifications for {plan}'s required behavior and connect every check to CI.
-
-      ## Grounding
-
-      Before selecting/preparing/using tools, inspect repository tool instructions and load available relevant installed skills through the executing agent's skill mechanism. Skills are optional: do not assume names, create/install skills, require a loader, or block if none exist; they never override repository or user requirements.
-
-      ## Quint
-
-      Model production-contract state/transitions, meaningful safety invariants, and executable tests; pin a repository-compatible Quint version. Run actual pinned commands:
-      - `quint typecheck <model.qnt>`
-      - `quint test <model.qnt>`
-      - `quint run --seed <integer> --max-samples <count> --max-steps <count> <model.qnt>`
-      - `quint verify --invariant <invariant> --max-steps <count> <model.qnt>`
-
-      Pin a compatible Apalache or TLC backend and required JDK when needed. Simulation is not proof; report seed/bounds and verification bound/backend.
-
-      ## Alloy
-
-      Model the same task-relevant contract with a meaningful assertion and satisfiable witness (so assertion success is not vacuous). Pin a released CLI artifact/checksum and compatible JDK/runtime. Follow its documented syntax, explicitly select commands (e.g. `--command '*'`), expect no assertion counterexample (`--expect 0`) and a meaningful witness (`--expect 1`). Run all assertions/witnesses, inspect the CLI receipt, fail unexpected results, and check pinned CLI help rather than relying on defaults.
-
-      ## Gherkin
-
-      Add task-grounded scenarios/step definitions exercising real production entry points and observable outputs/state. Use existing BDD conventions or add a stack-native executable runner/dependencies. Parser-only checks, dry runs, undefined/pending steps, no-op or mock-only definitions do not count; runner must fail on undefined/pending steps and assertion failures.
-
-      ## Execution and CI
-
-      Add all three specs/runners to reproducible dependency/install setup and provider-native CI, with pinned compatible versions and no secret-dependent PR execution. Run all checks from the repository; fix genuine source/spec defects according to requirements, never weaken invariants/assertions for green, and rerun affected checks. Report exact commands, versions, results, Alloy receipts, Quint bounds, CI files, defects fixed, and concrete missing prerequisites. Missing runner/platform is blocked, never a pass.
   e2e-baseline:
     flag: e2e
     command: '{cruise.bin} internal e2e-baseline e2e'

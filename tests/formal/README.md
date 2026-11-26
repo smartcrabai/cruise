@@ -1,5 +1,13 @@
 # Checkpoint contract verification
 
+`quint_formal_first.qnt` models the built-in execution-time gate: review a rendered
+revision before main steps, reissue the request on revision or resume, stop on
+rejection, and publish only verified evidence when publication is eligible.
+Run `npm ci --prefix tests/formal --ignore-scripts` then
+`bash scripts/check_quint_formal_first.sh`. The CI run checks the model and renders
+the successful witnesses using the production renderer. It is a bounded
+simulation and witness graph, not an exhaustive or implementation proof.
+
 For the daemon lifecycle, see `DAEMON.md` and run `bash scripts/check_daemon_specs.sh`.
 The `daemon.qnt` model checks locked autostart, single ownership, identity-checked
 signals, session preservation, registry-removal/takeover exit, bind fallback vs

@@ -54,6 +54,11 @@ jobs:
           node tests/webui/diff-browser.mjs
       - name: Production Option dialog browser test
         run: node tests/webui/option-dialog.mjs
+      - name: Quint-first state machine and production diagram approval
+        run: |
+          npm ci --prefix tests/formal --ignore-scripts
+          bash scripts/check_quint_formal_first.sh
+          node tests/webui/quint-review.mjs
       - name: Production locale browser test
         run: |
           node tests/webui/language.mjs

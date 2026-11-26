@@ -535,6 +535,7 @@ pub(crate) struct OptionDialogVm {
     pub(crate) session_title: String,
     pub(crate) request_id: String,
     pub(crate) prompt: String,
+    pub(crate) image_url: String,
     pub(crate) choices: Vec<ChoiceVm>,
     pub(crate) has_text_input: bool,
     pub(crate) text_label: String,

@@ -238,10 +238,12 @@ impl<'a> TerminalEvents<'a> {
         request_id: &str,
         prompt: Option<&str>,
         choices: &[OptionChoicePayload],
+        has_image: bool,
     ) -> Result<()> {
         if !self.handled_prompts.insert(request_id.to_owned()) {
             return Ok(());
         }
+        let _image = show_option_image(self.client, &self.session_id, request_id, has_image)?;
         let result = prompt_option(&self.session_id, prompt, choices)?;
         answer_or_note(
             self.client,
@@ -299,7 +301,10 @@ impl SessionEventHandler for TerminalEvents<'_> {
                 request_id,
                 prompt,
                 choices,
-            } if self.owns(session_id) => self.option(request_id, Some(prompt), choices),
+                has_image,
+            } if self.owns(session_id) => {
+                self.option(request_id, Some(prompt), choices, *has_image)
+            }
             _ => Ok(()),
         }
     }
@@ -345,6 +350,7 @@ impl SessionEventHandler for TerminalEvents<'_> {
                         &prompt.request_id,
                         prompt.question.as_deref(),
                         &prompt.choices,
+                        prompt.has_image,
                     )?;
                 }
             }
@@ -389,8 +395,9 @@ impl<'a> BatchPrompts<'a> {
                 request_id,
                 prompt,
                 choices,
+                has_image,
             } if accepts_batch_prompt(&self.sessions, session_id) => {
-                return self.option(session_id, request_id, Some(prompt), choices);
+                return self.option(session_id, request_id, Some(prompt), choices, *has_image);
             }
             _ => {}
         }
@@ -413,6 +420,7 @@ impl<'a> BatchPrompts<'a> {
                     &prompt.request_id,
                     prompt.question.as_deref(),
                     &prompt.choices,
+                    prompt.has_image,
                 )?,
             }
         }
@@ -439,11 +447,13 @@ impl<'a> BatchPrompts<'a> {
         request_id: &str,
         prompt: Option<&str>,
         choices: &[OptionChoicePayload],
+        has_image: bool,
     ) -> Result<()> {
         let key = (session_id.to_owned(), request_id.to_owned());
         if !self.handled.insert(key) {
             return Ok(());
         }
+        let _image = show_option_image(self.client, session_id, request_id, has_image)?;
         let answer = prompt_option(session_id, prompt, choices)?;
         answer_or_note(
             self.client,
@@ -530,6 +540,70 @@ fn option_choice(payload: &OptionChoicePayload) -> OptionChoice {
         OptionChoiceKind::Selector => OptionChoice::Selector { label, next },
         OptionChoiceKind::TextInput => OptionChoice::TextInput { label, next },
     }
+}
+
+struct LocalOptionImage(std::path::PathBuf);
+
+impl Drop for LocalOptionImage {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn show_option_image(
+    client: &DaemonClient,
+    session_id: &str,
+    request_id: &str,
+    has_image: bool,
+) -> Result<Option<LocalOptionImage>> {
+    if !has_image {
+        return Ok(None);
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err(waiting_for_input(session_id));
+    }
+    let result: Result<_> = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            let bytes = client.prompt_image(session_id, request_id).await?;
+            let dir = std::env::temp_dir().join(format!("cruise-quint-{}", uuid::Uuid::new_v4()));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt as _;
+                std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+            }
+            #[cfg(not(unix))]
+            std::fs::create_dir(&dir)?;
+            let guard = LocalOptionImage(dir);
+            #[cfg(windows)]
+            crate::platform::set_owner_only_acl(&guard.0)?;
+            let path = guard.0.join("quint.png");
+            std::fs::write(&path, bytes)?;
+            #[cfg(target_os = "macos")]
+            let opener = "open";
+            #[cfg(windows)]
+            let opener = "explorer.exe";
+            #[cfg(not(any(target_os = "macos", windows)))]
+            let opener = "xdg-open";
+            let mut child = tokio::process::Command::new(opener)
+                .arg(&path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()?;
+            if let Ok(status) =
+                tokio::time::timeout(std::time::Duration::from_secs(1), child.wait()).await
+                && !status?.success()
+            {
+                return Err(CruiseError::Other("No working local image viewer".into()));
+            }
+            eprintln!("Quint PNG: {}", path.display());
+            Ok(guard)
+        })
+    });
+    result.map(Some).map_err(|error| {
+        eprintln!("Could not display the Quint PNG: {error}. Use the WebUI to review it.");
+        waiting_for_input(session_id)
+    })
 }
 
 fn waiting_for_input(session_id: &str) -> CruiseError {

@@ -1871,7 +1871,7 @@ pub(crate) async fn run_prompt_step(
     } else {
         tool_policy.filter_mcp_servers(&compiled.mcp_servers)
     };
-    let prompt = if delivered.is_none() && vars.quality_gate_feedback().is_none() {
+    let mut prompt = if delivered.is_none() && vars.quality_gate_feedback().is_none() {
         crate::prompt_render::assemble_step_prompt(&step.prompt, vars, allow_commit, &tool_policy)?
     } else {
         crate::prompt_render::assemble_step_prompt_with_context(
@@ -1883,6 +1883,14 @@ pub(crate) async fn run_prompt_step(
             vars.quality_gate_feedback(),
         )?
     };
+    if let Some(model) = vars.named_file(crate::quint_workflow::APPROVED_VAR) {
+        use std::fmt::Write as _;
+        let _ = write!(
+            prompt,
+            "\n\nApproved Quint model: {}. Read it and follow its observable contract without altering the approved model. Report real, shareable evidence, not estimates.",
+            model.display(),
+        );
+    }
 
     let executor = crate::executor::Executor::new(compiled.sdk.as_deref(), &compiled.command);
     let model_or_mode = if advisor {
@@ -2069,6 +2077,7 @@ pub(crate) async fn run_prompt_step(
         if let Some(output_file) = step.output_file.as_deref() {
             vars.write_artifact(output_file, &output)?;
         }
+        crate::quint_workflow::record_workflow_report(vars, timeout_step_name, &output)?;
         vars.set_prev_output(Some(output));
         vars.set_prev_stderr(Some(result.stderr));
         vars.set_prev_input(None);

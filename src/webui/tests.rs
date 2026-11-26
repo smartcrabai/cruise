@@ -2199,6 +2199,7 @@ mod event_partials {
                 session_id: session.id.clone(),
                 request_id: "r1".to_string(),
                 prompt: "Pick one".to_string(),
+                has_image: false,
                 choices: vec![OptionChoicePayload {
                     label: "Continue".to_string(),
                     kind: OptionChoiceKind::Selector,

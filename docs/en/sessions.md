@@ -84,6 +84,8 @@ On Windows, when the `XDG_*` variables are unset, the defaults are `%APPDATA%\cr
 
    Eligible local worktree sessions without a PR can instead stage a squash merge while retaining the session, or explicitly merge and clean up the worktree, branch, and session.
 
+With `formal_methods`, Cruise waits for a PNG decision before ordinary steps. A non-interactive CLI leaves the decision to the WebUI or a terminal reattach. Rejecting stops without a PR. Revision or resume issues a new request. Cruise rechecks the approved revision before publication and retains shareable evidence for the PR/MR body and publication retry.
+
 <a id="model-and-fallback-notices"></a>
 ## Model and Fallback Notices
 

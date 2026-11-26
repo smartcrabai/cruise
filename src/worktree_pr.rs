@@ -445,6 +445,8 @@ async fn create_pr_attempt(
     cancel_token: Option<&CancellationToken>,
     on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
 ) -> Result<PrAttemptOutcome> {
+    let evidence =
+        crate::quint_workflow::publication_evidence(session, vars.artifacts_root(), &ctx.path)?;
     let (pr_title, pr_body) = generate_pr_description(
         &ctx.path,
         Some(&session.id),
@@ -460,11 +462,31 @@ async fn create_pr_attempt(
     }
     let texts =
         crate::pr_template::render_pr_texts(compiled, session, &ctx.branch, &pr_title, &pr_body)?;
-    let pr_body = crate::issue_input::with_closing_reference(&texts.body, session.issue_number);
+    let mut body = texts.body;
+    let mut title = texts.title;
+    if let Some(evidence) = &evidence {
+        body.push_str("\n\n");
+        body.push_str(evidence);
+        if title.trim().is_empty() {
+            title = session
+                .input_or_title()
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .chars()
+                .take(80)
+                .collect();
+            if title.is_empty() {
+                title = "Implement approved Quint model".into();
+            }
+        }
+    }
+    let pr_body = crate::issue_input::with_closing_reference(&body, session.issue_number);
     // Without an issue, GitHub's fill path historically ignores the generated body.
     let pr_body = if session.issue_number.is_none()
         && crate::forge::session_forge(session) == crate::forge::ForgeKind::GitHub
-        && texts.title.trim().is_empty()
+        && title.trim().is_empty()
         && compiled.pr_body_template.is_none()
     {
         ""
@@ -475,7 +497,7 @@ async fn create_pr_attempt(
         ctx,
         crate::forge::session_forge(session),
         session.input_or_title(),
-        (&texts.title, pr_body),
+        (&title, pr_body),
         || crate::pr_template::render_commit_message(compiled, session, &ctx.branch, &pr_title),
         (
             session.worktree_base_ref.as_deref(),

@@ -70,6 +70,18 @@ pre_steps:
     command: nix develop --command true
 ```
 
+<a id="quint-workflow-review"></a>
+### 工作流 Quint 审批
+
+使用 `-f formal_methods` 前，先在 **daemon 主机**安装 Node.js 和固定版本的工具。Unix 示例：
+
+```sh
+npm install --prefix "${XDG_DATA_HOME:-$HOME/.local/share}/cruise/quint-tools" --save-exact \
+  @informalsystems/quint@0.33.0 @viz-js/viz@3.31.0 @resvg/resvg-js@2.6.2
+```
+
+Windows 未设置 `XDG_DATA_HOME` 时使用 `%LOCALAPPDATA%/cruise/data/quint-tools`。`flags.formal_methods.quint_review: true` 保留在导出的 YAML 和新快照中。审批不可跳过，开始后切换标志须重置。图像来自通过的测试，不代表穷举。计划的 **Verify** 和 `builtin:add-formal-specs` 不变。
+
 <a id="config-file-reference"></a>
 ## 配置文件参考
 

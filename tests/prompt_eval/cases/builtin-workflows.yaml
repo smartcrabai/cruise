@@ -15,14 +15,14 @@ cases:
     vars: {plan: {file: tests/prompt_eval/fixtures/sample/plan.md}}
     checks: [{min_chars: 20}]
     rubric: [{id: tdd-implement-quality, text: 'The diff implements checked addition so the existing tests pass without weakening them.'}]
-  - id: tdd-formal
-    target: {workflow_step: {path: builtin/tdd.yaml, step: formal-methods}}
+  - id: tdd-quint-draft
+    target: {prompt_file: prompts/quint-draft.md}
     render: step
     output: text
     workspace: tests/prompt_eval/fixtures/addition
-    vars: {plan: {file: tests/prompt_eval/fixtures/sample/plan.md}}
+    vars: {input: 'Model checked addition.', plan: {file: tests/prompt_eval/fixtures/sample/plan.md}}
     checks: [{min_chars: 20}]
-    rubric: [{id: tdd-formal-quality, text: 'The response addresses formal verification or explains why it is not applicable.'}]
+    rubric: [{id: tdd-quint-draft-quality, text: 'Returns a self-contained Quint model with meaningful test witnesses and a diagram state/transition projection, without editing the repo or claiming checks ran.'}]
   - id: tdd-e2e
     target: {workflow_step: {path: builtin/tdd.yaml, step: e2e}}
     render: step

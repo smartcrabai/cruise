@@ -16,6 +16,10 @@ pub(super) fn routes() -> Router<WebState> {
         .route("/sessions/{id}", get(read_session))
         .route("/sessions/{id}/prompts", get(list_prompts))
         .route("/sessions/{id}/prompts/{request_id}", post(answer_prompt))
+        .route(
+            "/sessions/{id}/prompts/{request_id}/image",
+            get(prompt_image),
+        )
         .route("/sessions/{id}/cancel", post(cancel_session))
         .route("/sessions/{id}/pause", post(pause_session))
         .route("/run-all/cancel", post(cancel_run_all))
@@ -164,6 +168,24 @@ async fn list_prompts(Path(id): Path<String>, State(state): State<WebState>) -> 
         return super::map_error(&error);
     }
     axum::Json(state.application.pending_prompts(&id)).into_response()
+}
+
+pub(crate) async fn prompt_image(
+    Path((id, request_id)): Path<(String, String)>,
+    State(state): State<WebState>,
+) -> Response {
+    match state.application.prompt_image(&id, &request_id) {
+        Ok(bytes) => (
+            [
+                (axum::http::header::CONTENT_TYPE, "image/png"),
+                (axum::http::header::CACHE_CONTROL, "no-store"),
+                (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(error) => super::map_error(&error),
+    }
 }
 
 #[derive(Deserialize)]

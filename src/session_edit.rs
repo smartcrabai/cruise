@@ -114,6 +114,7 @@ fn prepare_settings(
             .map(|(name, on)| (name.clone(), *on))
             .collect(),
     };
+    validate_quint_settings(session, &flags, &current_step_update)?;
     if let CurrentStepUpdate::Set(step_name) = &current_step_update {
         validate_current_step_name(&config, session.execution_stage, step_name, &skipped_steps)?;
     }
@@ -127,6 +128,35 @@ fn prepare_settings(
         config,
         config_changed,
     })
+}
+
+fn validate_quint_settings(
+    session: &SessionState,
+    flags: &crate::flags::FlagValues,
+    update: &CurrentStepUpdate,
+) -> Result<()> {
+    use crate::quint_workflow::{FLAG, Stage, flag_changed};
+    let Some(run) = &session.quint_run else {
+        return Ok(());
+    };
+    if !matches!(update, CurrentStepUpdate::Clear)
+        && run.enabled() != (flags.get(FLAG) == Some(&true))
+    {
+        return Err(flag_changed());
+    }
+    if matches!(update, CurrentStepUpdate::Set(_))
+        && run.stage().is_some_and(|stage| {
+            !matches!(
+                stage,
+                Stage::Running { .. } | Stage::MainFailed { .. } | Stage::Verified { .. }
+            )
+        })
+    {
+        return Err(CruiseError::Other(
+            "Cannot select an implementation step before Quint approval".into(),
+        ));
+    }
+    Ok(())
 }
 /// Update config and skip-step settings for an editable session.
 ///
@@ -163,6 +193,7 @@ pub fn update_session_settings(
             session.has_dag = false;
             session.execution_stage = SessionExecutionStage::Main;
             session.execution_id = Some(uuid::Uuid::new_v4().to_string());
+            session.quint_run = None;
         }
         CurrentStepUpdate::Set(step_name) => {
             session.current_step = Some(step_name);

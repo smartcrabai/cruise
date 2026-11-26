@@ -305,6 +305,7 @@ pub(crate) fn pending_option_dialog_html(state: &WebState, id: &str) -> Result<S
         &prompt.request_id,
         prompt.question.as_deref().unwrap_or("Choose an option"),
         &prompt.choices,
+        prompt.has_image,
     )
 }
 

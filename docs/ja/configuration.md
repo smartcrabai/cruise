@@ -72,6 +72,18 @@ pre_steps:
     command: nix develop --command true
 ```
 
+<a id="quint-workflow-review"></a>
+### ワークフローの Quint 承認
+
+`-f formal_methods` を使う前に **daemon ホスト**に Node.js と固定版のツールを用意します。Unix の例:
+
+```sh
+npm install --prefix "${XDG_DATA_HOME:-$HOME/.local/share}/cruise/quint-tools" --save-exact \
+  @informalsystems/quint@0.33.0 @viz-js/viz@3.31.0 @resvg/resvg-js@2.6.2
+```
+
+Windows で `XDG_DATA_HOME` が未設定なら `%LOCALAPPDATA%/cruise/data/quint-tools` を使用します。`flags.formal_methods.quint_review: true` は eject 後の YAML と新規 snapshot にも残ります。承認はスキップ不可。開始後の flag 変更にはリセットが必要です。図は成功したテストに由来し、全状態探索ではありません。plan の **Verify** と `builtin:add-formal-specs` は従来どおりです。
+
 <a id="config-file-reference"></a>
 ## 設定ファイルのリファレンス
 

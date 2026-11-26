@@ -501,6 +501,7 @@ fn form_fixtures() -> Vec<(&'static str, Value)> {
                 session_title: "Add a WebUI".to_string(),
                 request_id: "r1".to_string(),
                 prompt: "Pick a branch".to_string(),
+                image_url: String::new(),
                 choices: vec![ChoiceVm {
                     label: "Continue".to_string(),
                     selector: true,

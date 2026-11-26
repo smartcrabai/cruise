@@ -5,7 +5,8 @@ flags:
   e2e:
     description: Add and run real UI end-to-end coverage for applicable in-scope targets
   formal_methods:
-    description: Add and run useful executable Quint, Alloy, and Gherkin specifications when applicable
+    description: Approve a Quint model before refactoring and verify it before publication
+    quint_review: true
 
 groups:
   verify-refactor:
@@ -185,29 +186,6 @@ steps:
       </test-decisions>
 
       Output `## Structure Decisions` with concise applied/done/kept evidence, including references updated. If none apply, make no changes and include `NO_CHANGES_INTENTIONAL: no applicable structure change`.
-  prepare-formal:
-    flag: formal_methods
-    output_file: refactor/formal-preparation.md
-    prompt: |-
-      Prepare useful formal/executable specifications for frozen-scope behavior. Do not run checks; the flag-gated final step executes them and fixes real failures.
-
-      <frozen-scope>
-      {file:refactor/baseline.md}
-      </frozen-scope>
-      <prior-decisions>
-      {file:refactor/code-decisions.md}
-      {file:refactor/test-decisions.md}
-      {file:refactor/structure-decisions.md}
-      </prior-decisions>
-      Task: {input}
-
-      Identify a real stateful invariant/behavior. Models must reflect requirements/production, invoke production behavior via Gherkin, and avoid prose-only examples, vacuous invariants, parser/no-op steps, behavior-replacing mocks, or unrelated tests. Preserve contracts and existing work.
-
-      Pin compatible tools/runtimes per repo; do not install tools or invent syntax. Quint: typecheck/test/run/verify; simulation is not proof, bounded checks state invariant/bounds, proof backends may need Apalache/TLC and JDK. Alloy: pin release/JAR checksum and JDK, validate pinned CLI help, select all intended commands (e.g. `--command '*'`), check receipts; expect 0 for no-counterexample assertions and 1 for satisfiable witness, including witness to prevent vacuity. Gherkin steps must be production-connected and fail on undefined/pending. Never present bounded checking as unbounded proof.
-
-      Before selecting/preparing/using Quint, Alloy, or Gherkin, inspect/load relevant available installed skills through the executing agent's skill mechanism, if provided. Skills are optional: do not assume names/loader, install/create skills, or let guidance replace tools/repo requirements.
-
-      If no in-scope behavior is modelable without invented requirements, make no changes and explain evidence. Otherwise implement all three forms (Quint, Alloy, Gherkin) and the smallest native CI/check integration that fails on counterexamples, assertions, undefined/pending steps, or tool errors. Output changed paths/commands or `NO_CHANGES_INTENTIONAL: no applicable formal model`.
   prepare-e2e-baseline:
     flag: e2e
     command: '{cruise.bin} internal e2e-baseline prepare-e2e'
@@ -239,22 +217,6 @@ steps:
       Report targets, framework/policy IDs, changed paths, tools/versions, app setup/build/test commands, assertion/screenshot plans, isolation/reset, CI wiring the suite still needs, blockers/missing capabilities. State no E2E suite ran. If no UI flow applies, give frozen-scope evidence and `NO_CHANGES_INTENTIONAL: no applicable E2E`.
   verify-refactor-pass:
     group: verify-refactor
-  formal-final-check:
-    flag: formal_methods
-    output_file: refactor/formal-verification.md
-    prompt: |-
-      Run final formal verification after audit/apply changes; add no unrelated specs. Fix actual failures in models, production behavior, or CI while preserving requirements.
-      Before using Quint, Alloy, or Gherkin, inspect/load relevant available installed skills through the executing agent's skill mechanism, if provided. Skills are optional: do not assume names/loader, install/create skills, or let guidance replace tools/repo requirements.
-      Run each applicable repository-configured native command for Quint, Alloy, and executable Gherkin; report exact commands/results. Never claim bounded checks are unbounded proofs. Quint: typecheck/test plus explicit nontrivial-invariant `verify` with declared max-steps; `run` is simulation only. Alloy: pinned compatible CLI/JDK, validate syntax against version help, select all intended commands (e.g. `--command '*'`), run assertions with expectation 0 and satisfiable witness with expectation 1, and check receipts. Gherkin: production-connected steps; fail on undefined/pending/assertion errors. Do not install missing tools or silently skip required checks; state exact missing prerequisite. After a fix, rerun only the failed command. Keep edits in frozen scope and preserve user work.
-
-      <frozen-scope>
-      {file:refactor/baseline.md}
-      </frozen-scope>
-      <preparation>
-      {file:refactor/formal-preparation.md}
-      </preparation>
-
-      If no model applies, report and make no changes. Otherwise report each command, bounded proof scope/receipt, fixes, and final result. No vanity metrics.
   e2e-final-baseline:
     flag: e2e
     command: '{cruise.bin} internal e2e-baseline e2e-final-check'

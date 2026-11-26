@@ -162,6 +162,10 @@ pub(crate) fn router(state: WebState) -> Router {
             post(handlers::ask_answer),
         )
         .route("/webui/sessions/{id}/option", post(handlers::option_answer))
+        .route(
+            "/webui/sessions/{id}/prompts/{request_id}/image",
+            get(crate::daemon::api::sessions::prompt_image),
+        )
         .route("/webui/sessions/{id}/publish", post(handlers::publish))
         .route(
             "/webui/sessions/{id}/merge-pr",

@@ -83,6 +83,15 @@ pub fn validate_name(name: &str) -> Result<PathBuf> {
 /// Returns an error when the root or artifact is missing, unsafe, not a regular
 /// file, larger than [`MAX_ARTIFACT_SIZE`], unreadable, or not valid UTF-8.
 pub fn read(root: &Path, name: &str) -> Result<String> {
+    String::from_utf8(read_bytes(root, name, MAX_ARTIFACT_SIZE)?).map_err(|error| {
+        read_error(
+            name,
+            &std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+        )
+    })
+}
+
+pub(crate) fn read_bytes(root: &Path, name: &str, max_size: usize) -> Result<Vec<u8>> {
     let relative = validate_name_for_io(name)?;
     let path = resolve_existing_path(root, &relative, name)?;
     let metadata = fs::symlink_metadata(&path).map_err(|error| read_error(name, &error))?;
@@ -92,32 +101,24 @@ pub fn read(root: &Path, name: &str) -> Result<String> {
             &std::io::Error::other("artifact is not a regular file"),
         ));
     }
-    if metadata.len() > MAX_ARTIFACT_SIZE as u64 {
+    if metadata.len() > max_size as u64 {
         return Err(size_error(name));
     }
 
     let mut file = File::open(&path).map_err(|error| read_error(name, &error))?;
     let capacity = usize::try_from(metadata.len())
-        .unwrap_or(MAX_ARTIFACT_SIZE)
+        .unwrap_or(max_size)
         .saturating_add(1);
-    let mut bytes = Vec::with_capacity(MAX_ARTIFACT_SIZE.min(capacity));
+    let mut bytes = Vec::with_capacity(max_size.min(capacity));
     std::io::Read::by_ref(&mut file)
-        .take(MAX_ARTIFACT_SIZE as u64 + 1)
+        .take(max_size as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| read_error(name, &error))?;
-    if bytes.len() > MAX_ARTIFACT_SIZE {
+    if bytes.len() > max_size {
         return Err(size_error(name));
     }
 
-    String::from_utf8(bytes).map_err(|error| {
-        read_error(
-            name,
-            &std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("invalid UTF-8: {error}"),
-            ),
-        )
-    })
+    Ok(bytes)
 }
 
 /// Remove a regular session artifact. A missing root or artifact is harmless.

@@ -1,5 +1,5 @@
 pub mod alloy;
-mod process;
+pub(crate) mod process;
 pub mod quint;
 mod tools;
 use crate::{

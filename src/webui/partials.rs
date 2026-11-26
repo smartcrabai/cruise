@@ -434,6 +434,7 @@ pub(crate) fn option_dialog_html(
     request_id: &str,
     prompt: &str,
     choices: &[crate::application::OptionChoicePayload],
+    has_image: bool,
 ) -> Result<String> {
     let session = state.application.read_session(session_id).ok();
     if session
@@ -464,6 +465,11 @@ pub(crate) fn option_dialog_html(
         session_title,
         request_id: request_id.to_string(),
         prompt: prompt.to_string(),
+        image_url: if has_image {
+            format!("/webui/sessions/{session_id}/prompts/{request_id}/image")
+        } else {
+            String::new()
+        },
         choices: selectors,
         has_text_input: text_choice.is_some(),
         text_label: text_choice.map_or_else(|| "Answer".to_string(), |choice| choice.label.clone()),
@@ -697,8 +703,10 @@ fn try_for_event(state: &WebState, event: &ApplicationEvent) -> Result<Vec<SseMe
             request_id,
             prompt,
             choices,
+            has_image,
         } => {
-            let dialog = option_dialog_html(state, session_id, request_id, prompt, choices)?;
+            let dialog =
+                option_dialog_html(state, session_id, request_id, prompt, choices, *has_image)?;
             if dialog.is_empty() {
                 out.push(SseMessage::Html(header_and_row(state, session_id, None)?));
                 out.extend(notify(state, ToastKind::InputRequired, prompt));
