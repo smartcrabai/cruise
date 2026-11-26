@@ -308,6 +308,7 @@ fn shell_fixtures() -> Vec<(&'static str, Value)> {
                 header: RawHtml::new("<header id=\"session-header-s1\"></header>"),
                 sync: RawHtml::new("<div id=\"session-sync-s1\"></div>"),
                 ask_panel: RawHtml::empty(),
+                quint_review: RawHtml::empty(),
                 settings: RawHtml::empty(),
                 editor: RawHtml::empty(),
                 active_tab: "plan".to_string(),

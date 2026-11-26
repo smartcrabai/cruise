@@ -176,6 +176,7 @@ pub(crate) struct SessionDetailVm {
     pub(crate) header: RawHtml,
     pub(crate) sync: RawHtml,
     pub(crate) ask_panel: RawHtml,
+    pub(crate) quint_review: RawHtml,
     pub(crate) settings: RawHtml,
     pub(crate) editor: RawHtml,
     pub(crate) active_tab: String,

@@ -246,11 +246,19 @@ pub(crate) fn session_sync_partials(state: &WebState, id: &str, version: &str) -
             &super::pages::tab_panel_html(state, id, tab)?,
         ));
     }
+    out.push_str(&quint_review_partial(state, id)?);
     out.push_str(&replace(
         &format!("session-sync-{id}"),
         &session_sync_html(state, id, version)?,
     ));
     Ok(out)
+}
+
+fn quint_review_partial(state: &WebState, id: &str) -> Result<String> {
+    Ok(by_id(
+        &format!("quint-review-{id}"),
+        &super::pages::pending_option_html(state, id, true)?,
+    ))
 }
 
 fn visible_in_sidebar(session: &crate::session::SessionState) -> bool {
@@ -705,15 +713,21 @@ fn try_for_event(state: &WebState, event: &ApplicationEvent) -> Result<Vec<SseMe
             choices,
             has_image,
         } => {
-            let dialog =
-                option_dialog_html(state, session_id, request_id, prompt, choices, *has_image)?;
-            if dialog.is_empty() {
-                out.push(SseMessage::Html(header_and_row(state, session_id, None)?));
-                out.extend(notify(state, ToastKind::InputRequired, prompt));
-                return Ok(out);
-            }
+            let mut html = if *has_image {
+                let mut html = header_and_row(state, session_id, None)?;
+                html.push_str(&quint_review_partial(state, session_id)?);
+                html
+            } else {
+                let dialog =
+                    option_dialog_html(state, session_id, request_id, prompt, choices, false)?;
+                if dialog.is_empty() {
+                    out.push(SseMessage::Html(header_and_row(state, session_id, None)?));
+                    out.extend(notify(state, ToastKind::InputRequired, prompt));
+                    return Ok(out);
+                }
+                targeted("#dialogs", "beforeend", &dialog)
+            };
             let input = session_input(state, session_id);
-            let mut html = targeted("#dialogs", "beforeend", &dialog);
             html.push_str(&sse_toast(
                 state,
                 ToastKind::InputRequired,

@@ -3,7 +3,8 @@
 The Quint approval browser contract (`node tests/webui/quint-review.mjs`) also
 needs `npm ci --prefix tests/formal --ignore-scripts`. It runs the actual
 daemon, Chromium, pinned Quint, and PNG renderer; a deterministic command
-produces the synthetic model without a provider. It covers image reattachment,
+produces the synthetic model without a provider. It covers session navigation
+and operations during review, image reattachment,
 approve, reject, revise, stale preview, and flag-off. CI uploads its screenshots.
 
 ## Manager browser workflow

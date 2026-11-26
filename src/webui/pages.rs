@@ -136,7 +136,7 @@ pub(crate) async fn session(
     render(|| {
         let tab = normalize_tab(query.tab.as_deref());
         let main = session_detail_html(&state, &id, tab)?;
-        let dialogs = pending_option_dialog_html(&state, &id)?;
+        let dialogs = pending_option_html(&state, &id, false)?;
         respond_page(&state, &headers, main, Some(&id), None, dialogs)
     })
 }
@@ -268,6 +268,7 @@ pub(crate) fn session_detail_html(state: &WebState, id: &str, tab: &str) -> Resu
         header: RawHtml::new(header),
         sync: RawHtml::new(partials::session_sync_html(state, id, &version)?),
         ask_panel: RawHtml::new(ask_panel),
+        quint_review: RawHtml::new(pending_option_html(state, id, true)?),
         settings: RawHtml::empty(),
         editor: RawHtml::empty(),
         active_tab: tab.to_string(),
@@ -290,12 +291,14 @@ pub(crate) fn session_detail_html(state: &WebState, id: &str, tab: &str) -> Resu
     state.templates.render("session-detail", &vm)
 }
 
-pub(crate) fn pending_option_dialog_html(state: &WebState, id: &str) -> Result<String> {
+pub(super) fn pending_option_html(state: &WebState, id: &str, has_image: bool) -> Result<String> {
     let Some(prompt) = state
         .application
         .pending_prompts(id)
         .into_iter()
-        .find(|prompt| matches!(prompt.kind, PendingPromptKind::Option))
+        .find(|prompt| {
+            matches!(prompt.kind, PendingPromptKind::Option) && prompt.has_image == has_image
+        })
     else {
         return Ok(String::new());
     };

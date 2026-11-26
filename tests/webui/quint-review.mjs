@@ -100,7 +100,8 @@ try {
   const browserEnv = { ...process.env };
   for (const key of ['DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'LD_LIBRARY_PATH']) delete browserEnv[key];
   browser = await chromium.launch({ headless: true, env: browserEnv });
-  const page = await browser.newPage({ viewport: { width: 1200, height: 900 }, reducedMotion: 'reduce' });
+  const context = await browser.newContext({ viewport: { width: 1200, height: 900 }, reducedMotion: 'reduce' });
+  const page = await context.newPage();
   page.setDefaultTimeout(15000);
   await loginWebUi(page, loginUrl);
   for (const name of ['approve', 'reject', 'revise', 'off']) {
@@ -108,8 +109,8 @@ try {
     await page.goto(`${base}/sessions/${id}`);
     await page.waitForFunction(() => !!window.app);
     await page.getByRole('button', { name: 'Run on current branch', exact: true }).click();
-    const dialog = page.getByRole('dialog');
-    const diagram = dialog.getByRole('img', { name: 'Quint state and transition diagram' });
+    const panel = page.getByRole('region', { name: 'Quint model review' });
+    const diagram = panel.getByRole('img', { name: 'Quint state and transition diagram' });
     const ready = async () => {
       await diagram.waitFor();
       await diagram.evaluate(img => img.decode());
@@ -123,12 +124,33 @@ try {
     };
     if (name !== 'off') {
       const first = await ready();
+      assert.equal(await page.getByRole('dialog').count(), 0);
+      await page.getByRole('tab', { name: 'Plan', exact: true }).click();
+      await page.getByRole('heading', { name: 'Counter', exact: true }).waitFor();
+      assert.deepEqual(await ready(), first, 'changing tabs leaves the review available');
       await page.screenshot({ path: join(reports, `${name}-waiting.png`) });
       await page.reload();
       assert.deepEqual(await ready(), first, 'reattach shows the same pending preview');
+      if (name === 'approve') {
+        const other = await fixture('cli', false);
+        await page.locator(`#session-row-${other.id}`).click();
+        await page.waitForURL(`**/sessions/${other.id}`);
+        await panel.waitFor({ state: 'detached' });
+        await page.getByRole('button', { name: 'Run on current branch', exact: true }).click();
+        await complete(other.dir, 'Completed');
+        assert.equal(await readFile(join(other.repo, 'observed.txt'), 'utf8'), '7\n');
+        assert.equal((await stored(dir)).awaiting_input, true);
+        await assert.rejects(access(join(repo, 'observed.txt')));
+        await page.getByText('Completed', { exact: true }).first().waitFor();
+        await page.screenshot({ path: join(reports, 'other-session-completed.png') });
+        await page.locator(`#session-row-${id}`).click();
+        await page.waitForURL(`**/sessions/${id}`);
+        assert.deepEqual(await ready(), first, 'returning keeps the original pending review');
+        console.log('nonmodal: Plan tab remains usable; another session completed while approval was pending');
+      }
       if (name === 'revise') {
-        await dialog.getByRole('textbox').fill('Make the saved-state label clearer');
-        await dialog.getByRole('button', { name: 'Submit', exact: true }).click();
+        await panel.getByRole('textbox').fill('Make the saved-state label clearer');
+        await panel.getByRole('button', { name: 'Submit', exact: true }).click();
         await page.waitForFunction(previous => {
           const img = document.querySelector('img[alt="Quint state and transition diagram"]');
           return img && img.getAttribute('src') !== previous;
@@ -139,7 +161,17 @@ try {
         await page.screenshot({ path: join(reports, 'revise-new.png') });
         console.log(`revision: PNG ${first.digest.slice(0, 12)} -> ${second.digest.slice(0, 12)}; no pre/implementation writes`);
       }
-      await dialog.getByRole('button', { name: name === 'reject' ? 'Reject and stop' : 'Approve Quint model', exact: true }).click();
+      if (name === 'reject') {
+        const otherTab = await context.newPage();
+        try {
+          await otherTab.goto(`${base}/sessions/${id}`);
+          await otherTab.getByRole('button', { name: 'Reject and stop', exact: true }).click();
+          await panel.waitFor({ state: 'detached' });
+        } finally { await otherTab.close(); }
+      } else {
+        await panel.getByRole('button', { name: 'Approve Quint model', exact: true }).click();
+        await panel.waitFor({ state: 'detached' });
+      }
     }
     const state = await complete(dir, name === 'reject' ? 'Failed' : 'Completed');
     if (name === 'reject') {
