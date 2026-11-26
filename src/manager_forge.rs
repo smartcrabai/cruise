@@ -340,7 +340,7 @@ pub(crate) fn lookup_title_retry(
 ) -> Result<Option<PullRequest>, String> {
     // A public PR list alone does not prove authentication on this host.
     let user = api(dir, ctx, "user", false, cancel)?;
-    if !user["id"].as_u64().is_some_and(|id| id > 0) {
+    if user["id"].as_u64().unwrap_or_default() == 0 {
         return Err("cannot establish authenticated GitHub identity".into());
     }
     lookup(dir, ctx, source, None, cancel)
