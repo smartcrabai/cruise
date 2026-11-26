@@ -10,8 +10,13 @@ use crate::manager_forge::{self, PullRequest, PullRequestState};
 use crate::manager_git::CheckEvidence;
 use serde::{Deserialize, Serialize};
 
-const GITHUB_TITLE_REJECTION: &str =
-    "gh failed: GraphQL: Title is too long (maximum is 256 characters) (createPullRequest)";
+fn is_github_title_rejection(message: &str) -> bool {
+    matches!(
+        message,
+        "gh failed: GraphQL: Title is too long (maximum is 256 characters) (createPullRequest)"
+            | "gh failed: pull request create failed: GraphQL: Title is too long (maximum is 256 characters) (createPullRequest)"
+    )
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Publication {
@@ -348,7 +353,7 @@ pub(crate) fn can_retry_title_rejection(goal: &Goal) -> bool {
             .as_deref()
             .and_then(|reason| reason.strip_prefix("PR create outcome uncertain (Err(\""))
             .and_then(|reason| reason.strip_suffix("\"), lookup Ok(None)). Human resolution required"))
-            == Some(GITHUB_TITLE_REJECTION)
+            .is_some_and(is_github_title_rejection)
 }
 
 /// Consume the explicit retry only after reconciling the exact rejected intent.
@@ -1210,31 +1215,30 @@ fn create_and_observe(context: &Reconciliation<'_>, p: Publication) -> Result<()
     if cancel.is_cancelled() {
         return Ok(());
     }
-    match manager_forge::lookup(
+    let observed = manager_forge::lookup(
         repo,
         ctx,
         &p.branch,
         Some(&goal.proposal.target_branch),
         cancel,
-    ) {
-        Ok(Some(pr)) => record_request(context, p, pr),
+    );
+    match (observed, create_result) {
+        (Ok(Some(pr)), _) => record_request(context, p, pr),
         _ if cancel.is_cancelled() => Ok(()),
-        Ok(None)
+        (Ok(None), Err(rejection))
             if ctx.kind == crate::forge::ForgeKind::GitHub
-                && create_result
-                    .as_ref()
-                    .is_err_and(|e| e == GITHUB_TITLE_REJECTION) =>
+                && is_github_title_rejection(&rejection) =>
         {
             block(
                 cwd,
                 id,
                 p,
                 format!(
-                    "GitHub rejected the submitted PR title ({GITHUB_TITLE_REJECTION}). Human resolution required"
+                    "GitHub rejected the submitted PR title ({rejection}). Human resolution required"
                 ),
             )
         }
-        other => block(
+        (other, create_result) => block(
             cwd,
             id,
             p,

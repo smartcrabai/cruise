@@ -225,7 +225,9 @@ mod github_publication {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    const REJECTED: &str = r#"PR create outcome uncertain (Err("gh failed: GraphQL: Title is too long (maximum is 256 characters) (createPullRequest)"), lookup Ok(None)). Human resolution required"#;
+    const REJECTED: &str = r#"PR create outcome uncertain (Err("gh failed: pull request create failed: GraphQL: Title is too long (maximum is 256 characters) (createPullRequest)"), lookup Ok(None)). Human resolution required"#;
+    const UNWRAPPED_REJECTED: &str = r#"PR create outcome uncertain (Err("gh failed: GraphQL: Title is too long (maximum is 256 characters) (createPullRequest)"), lookup Ok(None)). Human resolution required"#;
+    const AMBIGUOUS_REJECTION: &str = r#"PR create outcome uncertain (Err("gh failed: pull request create failed: GraphQL: Title is too long (maximum is 256 characters) (createPullRequest); request timed out"), lookup Ok(None)). Human resolution required"#;
 
     fn shim(home: &Path, name: &str, script: &str) -> Result<()> {
         let path = home.join("bin").join(name);
@@ -271,7 +273,7 @@ else
   printf '%s' "${12}" > "$HOME/body-$id"
   case "$id" in
     timeout) echo 'request timed out' >&2; exit 1;;
-    rejected) echo 'GraphQL: Title is too long (maximum is 256 characters) (createPullRequest)' >&2; exit 1;;
+    rejected) echo 'pull request create failed: GraphQL: Title is too long (maximum is 256 characters) (createPullRequest)' >&2; exit 1;;
   esac
   cp "$HOME/pr-$id" "$HOME/staged-$id"
   mv "$HOME/staged-$id" "$HOME/listed-$id"
@@ -406,19 +408,17 @@ fi
                 "checks":[{"id":"check","criterion_ids":["c"],"argv":argv}],
                 "tasks":[{"id":"task","instructions":"work","dependencies":[]}],"workflow":"builtin:tdd",
                 "contract":{"anchor":anchor,"origin":ORIGIN,"forge_kind":"GitHub","forge_host":"github.com","forge_repository":"example/project","workflow":workflow}});
-            let (status, phase, reason) = if matches!(
-                id,
-                "plain" | "ascii" | "unicode" | "rejected"
-            ) {
-                ("verifying", "Pushed", None)
-            } else {
-                let reason = if id == "unproven" {
-                    "PR create outcome uncertain (Err(\"request timed out\"), lookup Ok(None)). Human resolution required"
+            let (status, phase, reason) =
+                if matches!(id, "plain" | "ascii" | "unicode" | "rejected") {
+                    ("verifying", "Pushed", None)
                 } else {
-                    REJECTED
+                    let reason = match id {
+                        "existing" => UNWRAPPED_REJECTED,
+                        "unproven" => AMBIGUOUS_REJECTION,
+                        _ => REJECTED,
+                    };
+                    ("blocked", "CreateIntent", Some(reason))
                 };
-                ("blocked", "CreateIntent", Some(reason))
-            };
             let publication_checks = if id == "missing-checks" {
                 json!([])
             } else {
@@ -506,6 +506,13 @@ fi
             let attempts = fs::read(&marker).ok();
             let out = retry(id)?;
             assert!(!out.status.success(), "unsafe retry accepted for {id}");
+            if id == "moved-base" {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                assert!(
+                    stderr.contains("Remote ref moved differs from verified publication"),
+                    "{stderr}"
+                );
+            }
             assert_eq!(goal_in(record, id)?, before);
             assert_eq!(fs::read(marker).ok(), attempts);
             Ok(())
