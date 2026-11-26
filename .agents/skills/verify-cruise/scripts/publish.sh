@@ -39,7 +39,7 @@ while IFS= read -r -d '' file; do
   rel=${file#"$src"/}
   url="https://github.com/$slug/blob/$commit/$dest/$rel"
   case "$rel" in
-    *.png) printf '![%s](%s?raw=true)\n' "$rel" "$url" ;;
+    *.png) printf '![%s](https://github.com/%s/raw/%s/%s/%s)\n' "$rel" "$slug" "$commit" "$dest" "$rel" ;;
     *) printf -- '- [%s](%s)\n' "$rel" "$url" ;;
   esac
 done < <(find "$src" -type f ! -name '*.raw' -print0 | sort -z)
