@@ -9,7 +9,7 @@ if [[ "${1:-}" != --no-build ]]; then
   cargo +1.99.1 build --locked --all-features --bin cruise --bin cruise-runtime --example verify_pty >&2
 fi
 # Node.js serves the daemon's Quint tools and the browser scripts; keep the caller's.
-node_dir=$(dirname "$(command -v node || echo /usr/bin/node)")
+node_dir=$(dirname "$(node -p process.execPath 2>/dev/null || echo /usr/bin/node)")
 root=$(mktemp -d "${TMPDIR:-/tmp}/verify-cruise.XXXXXX")
 root=$(cd "$root" && pwd -P)
 mkdir -p "$root/home/config/cruise" "$root/home/data" "$root/home/state" "$root/repo"
