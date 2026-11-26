@@ -150,7 +150,8 @@ pub(crate) fn check(cwd: &Path, plan: &Path, repair: RepairLoop) -> Result<bool>
     let root = session_artifacts_root(plan)?;
     let mut state = load(&root)?;
     let current: BTreeSet<String> = match repair {
-        RepairLoop::Ci => crate::ci_followup::failing_checks(&root)?,
+        // Unavailable CI evidence owes nothing; the repair prompt reports it and waits.
+        RepairLoop::Ci => crate::ci_followup::failing_checks(&root).unwrap_or_default(),
         RepairLoop::Review => worklist_ids(&crate::artifacts::read(&root, WORKLIST_NAME)?),
     }
     .into_iter()
@@ -160,6 +161,7 @@ pub(crate) fn check(cwd: &Path, plan: &Path, repair: RepairLoop) -> Result<bool>
     if owed.is_empty() {
         state.pending = None;
         save(&root, &state)?;
+        let _ = crate::artifacts::remove(&root, repair.owed());
         crate::artifacts::write(&root, repair.report(), "No premise is owed for this fix.\n")?;
         return Ok(false);
     }
