@@ -871,6 +871,9 @@ case "$1:$2" in
     printf 'capture\n' >> "$WAIT_CI_INTERNAL_CALLS"
     cat > "$WAIT_CI_CAPTURE"
     exit $? ;;
+  internal:premise-ci-passed)
+    printf 'premise-ci-passed\n' >> "$WAIT_CI_INTERNAL_CALLS"
+    exit 0 ;;
   *) printf 'unexpected fake cruise command: %s\n' "$*" >&2; exit 97 ;;
 esac
 "#,
@@ -887,10 +890,14 @@ fn assert_wait_ci_internal_calls(output: &Output, calls: &Path, capture: &Path) 
         .lines()
         .find(|line| line.starts_with("CRUISE_CI_DIAGNOSTIC_V4 "));
     let expected_capture = marker.is_some_and(|line| line.split(' ').nth(2) == Some("ci_failed"));
+    // A confirmed green head resets the premise counts for CI checks.
+    let passed = String::from_utf8_lossy(&output.stdout).contains("GitHub CI passed for HEAD");
     assert_eq!(
         calls.lines().collect::<Vec<_>>(),
         if expected_capture {
             vec!["clear", "capture"]
+        } else if passed {
+            vec!["clear", "premise-ci-passed"]
         } else {
             vec!["clear"]
         },

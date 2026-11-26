@@ -480,6 +480,18 @@ pub enum InternalCommand {
     CaptureCiFollowup,
     FinishCiFollowup,
     RerunUnacquiredCi,
+    /// Exit 1 when the next fix in a repair loop needs a premise step, 0 otherwise.
+    PremiseCheck {
+        /// Repair loop whose gates are checked.
+        repair: crate::premise::RepairLoop,
+    },
+    /// Validate a premise report and record its verdicts (quality gate).
+    PremiseRecord {
+        /// Repair loop whose pending premise is recorded.
+        repair: crate::premise::RepairLoop,
+    },
+    /// Reset CI premise counts after every check passed.
+    PremiseCiPassed,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]

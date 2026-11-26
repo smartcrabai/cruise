@@ -82,9 +82,10 @@ after-pr:
 
 `tdd` and `research` have an explicit, default-off `merge` flag. The built-in after-PR prelude uses `flag: [after_pr, merge]` on its `follow-up` workflow call, propagated to the expanded steps of `tdd` and `research`, so either flag runs it; the native final action is gated only by `merge`. `-f merge` therefore runs the prelude even when `after_pr` is off, and the prelude runs once. `-f after_pr` alone never merges. No PR is created or merged when the workflow has `create_pr: false` (including `research`), uses `exec`/current-branch mode, or has no commits eligible for PR creation; opted-in actions are skipped with a reason. The merge flag does not override read-only or no-PR policy.
 
-`tdd` and `research` share the ordered prelude `pr-ready` →
+`tdd` and `research` share the prelude `pr-ready` →
 `sync-base` → `resolve-conflict` → `push-after-sync` → `wait-ci` →
-`rerun-unacquired-ci` → `fix-ci-error`. Each caller passes its conflict prompt and task-specific scope
+`rerun-unacquired-ci` → `ci-premise-check` → (`ci-premise` →
+`ci-premise-record` →) `fix-ci-error` → `finish-ci-fix` → `wait-ci`. Each caller passes its conflict prompt and task-specific scope
 into the shared resource, which owns the common CI repair prompt. Before
 `push-after-sync` commits a resolution, the host refuses tracked edits outside
 the recorded conflict paths and added or removed untracked, non-ignored paths;
@@ -97,7 +98,7 @@ already failing, `wait-ci` keeps polling attached Actions suites until they
 finish or the deadline; the deadline preserves the failure and invokes repair.
 
 On a CI failure, `rerun-unacquired-ci` (`{cruise.bin} internal
-rerun-unacquired-ci`, `next: wait-ci`, `if.fail: fix-ci-error`) reruns the
+rerun-unacquired-ci`, `next: wait-ci`, `if.fail: ci-premise-check`) reruns the
 failed jobs with `gh run rerun --failed` only when every failed check is a
 GitHub Actions job that no runner acquired. The host confirms this through the
 API (conclusion `cancelled`, no runner, no steps, and the check-run failure
@@ -108,8 +109,18 @@ default `2`, `0` disables; set with `cruise config
 --set-ci-unacquired-rerun-max-attempts <N>`), counted in
 `ci-followup/unacquired-reruns.json` in the session so resuming never
 recounts. Mixed failures, other forges, a spent limit, or any refusal go to
-`fix-ci-error` unchanged; mixed failures are not rerun because a repair pushes
+`ci-premise-check` and then `fix-ci-error`; mixed failures are not rerun because a repair pushes
 a new head and `--failed` would also rerun the genuine failures.
+
+`ci-premise-check` (`{cruise.bin} internal premise-check ci`) exits 0 and
+continues to `fix-ci-error` unless two host-committed repairs already failed
+against a still-failing check with no premise tested since; then it exits 1
+and `if.fail` runs the read-only `ci-premise` prompt (premise, probe,
+observation, and `held`/`refuted`/`no shared premise` per check in
+`premise/ci.md`) and `ci-premise-record`, which stops the run on an
+incomplete report or any workspace change. `fix-ci-error` always receives
+`premise/ci.md`. Counts live in `premise/state.json`; every check passing
+resets them.
 
 On failure, `fix-ci-error` receives the prior wait diagnostic, enumerates all
 non-success checks for the current head, and reads logs (including canceled or

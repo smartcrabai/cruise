@@ -73,7 +73,8 @@ pub(crate) fn refresh_after_apply(cwd: &Path, plan_path: &Path) -> Result<()> {
     verify_commit(cwd, snapshot)?;
 
     let contents = format!("head: {head}\nsnapshot: {snapshot}\n{}\n", records.body);
-    crate::artifacts::write(&artifacts_root, LEDGER_NAME, &contents)
+    crate::artifacts::write(&artifacts_root, LEDGER_NAME, &contents)?;
+    crate::premise::review_observed(&artifacts_root, &records.body)
 }
 
 fn ledger_records(output: &str) -> Result<LedgerRecords> {

@@ -297,6 +297,11 @@ queries. It fixes all in-scope failures in one pass and runs matching
 formatters, linters, and tests before commit. Unrelated/flaky jobs are rerun
 once or reported clearly; no-change repairs do not loop.
 
+After two host-committed repairs failed against the same check, a read-only
+`follow-up/ci-premise` step writes the premise those repairs shared, probes
+it, and records a verdict that the next repair prompt receives; it stops the
+run if it changes the workspace. TDD's apply loop does the same per finding.
+
 Before that prompt, `follow-up/rerun-unacquired-ci` handles GitHub failures
 made only of Actions jobs that no runner acquired (API-verified: conclusion
 `cancelled`, no runner, no steps, failure annotation `The job was not acquired
