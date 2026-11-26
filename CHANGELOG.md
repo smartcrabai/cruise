@@ -60,6 +60,7 @@
 
 ### Fixed
 
+- Make built-in after-PR base sync independent of Git's `merge.ff` setting: fast-forward when possible and keep the existing conflict checks.
 - Allow Manager retarget after an integrated retry supersedes an older finalized result. Retarget still rejects unintegrated latest attempts and unresolved work.
 - Recognize the complete `gh pr create` error wrapper when recovering a confirmed legacy GitHub title rejection, without changing the retry safety checks.
 - Bound Cruise Manager GitHub PR titles to 256 Unicode characters, preserving the full Objective in the description when shortened. `cruise manager retry GOAL` can reconcile a legacy, confirmed title rejection without rerunning checks or repeating an uncertain create.

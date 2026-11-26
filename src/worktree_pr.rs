@@ -1918,7 +1918,7 @@ fn merge_fetched_base(
     merge_target: &str,
 ) -> std::result::Result<(), (SyncBaseFailure, CruiseError)> {
     run("git", fetch_args).map_err(|error| (SyncBaseFailure::FetchFailed, error))?;
-    let merge = run("git", &["merge", "--no-edit", merge_target]);
+    let merge = run("git", &["merge", "--ff", "--no-edit", merge_target]);
     if let Err(error) = merge {
         let has_unmerged_paths = run("git", &["diff", "--name-only", "--diff-filter=U"])
             .is_ok_and(|output| !output.stdout.is_empty());
@@ -2712,7 +2712,7 @@ mod tests {
                         "refs/heads/main"
                     ]
                 ),
-                call("git", &["merge", "--no-edit", "FETCH_HEAD"]),
+                call("git", &["merge", "--ff", "--no-edit", "FETCH_HEAD"]),
             ]
         );
     }
@@ -2743,7 +2743,7 @@ mod tests {
                         "refs/heads/develop"
                     ]
                 ),
-                call("git", &["merge", "--no-edit", "FETCH_HEAD"]),
+                call("git", &["merge", "--ff", "--no-edit", "FETCH_HEAD"]),
             ]
         );
     }

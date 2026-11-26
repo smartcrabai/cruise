@@ -4,6 +4,8 @@ Steps that run automatically after `cruise run` creates a pull request via `gh p
 
 `tdd` and `research` declare `after_pr` and `merge`, both off by default; `research` is `create_pr: false`, so its flags are skipped with a reason. `refactor`, `add-tests`, `add-formal-specs`, and `security` declare neither flag and have no after-PR steps, even with `--no-force-exec`. `tdd` and `refactor` additionally declare the single `e2e` flag and `formal_methods`. `pr-review-fix` declares no flags. `-f after_pr` runs the after-PR prelude without merging. `-f merge` runs that same prelude once, then attempts the final native squash step. The implication does not add or change an `after_pr` entry in the saved sparse flag map. `e2e` enables applicable web, mobile, and desktop UI E2E; there are no separate browser/app flags.
 
+The built-in `sync-base` uses `git merge --ff --no-edit`: fast-forward when possible, a local merge when divergent, and guarded resolution on conflict, regardless of local `merge.ff`.
+
 ```sh
 cruise plan -c builtin:tdd -f merge "task"
 cruise plan -c builtin:tdd -f e2e,merge "task"

@@ -2187,9 +2187,75 @@ esac
         }
     }
 
+    #[test]
+    fn pinned_base_sync_uses_explicit_fast_forward_policy() {
+        let _git_environment = isolated_host_git_environment();
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("create fixture: {error}"));
+        let repo = temp.path();
+        let git = |args: &[&str]| {
+            String::from_utf8(git_ok(repo, args).stdout)
+                .unwrap_or_else(|error| panic!("Git stdout is not UTF-8: {error}"))
+                .trim()
+                .to_owned()
+        };
+        git_ok(repo, &["init", "-q", "-b", "main"]);
+        git_ok(repo, &["config", "user.name", "Host Sync Test"]);
+        git_ok(repo, &["config", "user.email", "host-sync@example.invalid"]);
+        git_ok(repo, &["commit", "--allow-empty", "-qm", "initial"]);
+        let initial = git(&["rev-parse", "HEAD"]);
+        git_ok(repo, &["branch", "linear"]);
+        git_ok(repo, &["branch", "diverged"]);
+        fs::write(repo.join("upstream"), "new base\n")
+            .unwrap_or_else(|error| panic!("write upstream: {error}"));
+        git_ok(repo, &["add", "upstream"]);
+        git_ok(repo, &["commit", "-qm", "advance base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        git_ok(repo, &["remote", "add", "origin", "."]);
+
+        git_ok(repo, &["checkout", "linear"]);
+        git_ok(repo, &["config", "merge.ff", "false"]);
+        crate::worktree_pr::sync_validated_base(repo, &base)
+            .unwrap_or_else(|error| panic!("fast-forward pinned base: {error:?}"));
+        assert_eq!(
+            git(&["rev-list", "--parents", "-1", "HEAD"]),
+            format!("{base} {initial}")
+        );
+        println!("merge.ff=false: {initial} -> {base}, one parent");
+
+        git_ok(repo, &["checkout", "diverged"]);
+        git_ok(repo, &["commit", "--allow-empty", "-qm", "advance feature"]);
+        let feature = git(&["rev-parse", "HEAD"]);
+        git_ok(repo, &["config", "merge.ff", "only"]);
+        crate::worktree_pr::sync_validated_base(repo, &base)
+            .unwrap_or_else(|error| panic!("merge pinned base: {error:?}"));
+        let merged = git(&["rev-parse", "HEAD"]);
+        assert_eq!(
+            git(&["rev-list", "--parents", "-1", "HEAD"]),
+            format!("{merged} {feature} {base}")
+        );
+        println!("merge.ff=only: {feature} -> {merged}, parents {feature} {base}");
+
+        crate::worktree_pr::sync_validated_base(repo, &base)
+            .unwrap_or_else(|error| panic!("already contains pinned base: {error:?}"));
+        assert_eq!(git(&["rev-parse", "HEAD"]), merged);
+        println!("already contains base: HEAD remains {merged}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn fake_forge_sync_and_push_use_only_a_disposable_bare_remote() {
+        run_fake_forge_sync("none");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_forge_sync_rejects_head_or_base_drift() {
+        run_fake_forge_sync("main");
+        run_fake_forge_sync("feature");
+    }
+
+    #[cfg(unix)]
+    fn run_fake_forge_sync(drift: &str) {
         let _git_environment = isolated_host_git_environment();
         let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("create fixture: {error}"));
         let fixture = fake_forge_fixture(temp.path());
@@ -2226,6 +2292,7 @@ esac
         .env_remove("GIT_COMMON_DIR")
         .env_remove("GIT_INDEX_FILE")
         .env("CRUISE_HOST_SYNC_CHILD", "1")
+        .env("CRUISE_HOST_SYNC_DRIFT", drift)
         .env("CRUISE_HOST_SYNC_REPO", &repo)
         .env("CRUISE_HOST_SYNC_PLAN", &plan)
         .env("CRUISE_HOST_SYNC_BASE_HEAD", base_head)
@@ -2238,6 +2305,7 @@ esac
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        print!("{}", String::from_utf8_lossy(&output.stdout));
     }
 
     #[cfg(unix)]
@@ -2267,16 +2335,46 @@ esac
         )
         .unwrap_or_else(|error| panic!("clear host sync state: {error}"));
         assert_eq!(selected_base, base_head);
+        git_ok(&repo, &["config", "merge.ff", "only"]);
         let sync_result = crate::worktree_pr::sync_validated_base(&repo, &selected_base)
             .map_err(|(failure, _error)| failure);
-        record_sync_result(
+        assert!(matches!(sync_result, Err(SyncBaseFailure::MergeConflict)));
+        assert_eq!(
+            git_ok(&repo, &["rev-parse", "MERGE_HEAD"]).stdout,
+            format!("{base_head}\n").as_bytes()
+        );
+        assert_eq!(
+            git_ok(&repo, &["diff", "--name-only", "--diff-filter=U"]).stdout,
+            b"conflict.txt\n"
+        );
+        println!("merge.ff=only: conflict.txt unmerged at pinned MERGE_HEAD {base_head}");
+        let drift = std::env::var("CRUISE_HOST_SYNC_DRIFT").unwrap_or_default();
+        let moved_to = match drift.as_str() {
+            "main" => Some(head(&repo).unwrap_or_else(|error| panic!("read PR HEAD: {error}"))),
+            "feature" => Some(base_head),
+            _ => None,
+        };
+        if let Some(oid) = moved_to {
+            git_ok(
+                Path::new(&bare),
+                &["update-ref", &format!("refs/heads/{drift}"), &oid],
+            );
+        }
+        let recorded = record_sync_result(
             &plan,
             &repo,
             "7",
             Some("https://github.com/owner/repo/pull/7"),
             sync_result,
-        )
-        .unwrap_or_else(|error| panic!("record verified conflict: {error}"));
+        );
+        if drift == "main" || drift == "feature" {
+            assert!(recorded.is_err());
+            assert!(matches!(read_sync_result(&plan), Ok(SyncResult::Cleared)));
+            assert!(push_after_sync(&plan, &repo).is_err());
+            println!("remote {drift} drift: sync result cleared and push refused");
+            return;
+        }
+        recorded.unwrap_or_else(|error| panic!("record verified conflict: {error}"));
         resolver_output(&plan);
         resolve_conflict(&repo);
         finish_conflict_commit(&plan, &repo)
