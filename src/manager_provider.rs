@@ -228,11 +228,48 @@ pub(crate) fn propose(cwd: &Path) -> Result<Turn> {
     Ok(accepted)
 }
 
+fn proposal_response_edge(character: Option<char>, fence: bool) -> &'static str {
+    if fence {
+        return "fence";
+    }
+    match character {
+        None => "empty",
+        Some('{') => "object_open",
+        Some('}') => "object_close",
+        Some('[') => "array_open",
+        Some(']') => "array_close",
+        Some(c) if c.is_alphanumeric() => "text",
+        Some(_) => "other",
+    }
+}
+
 async fn run_proposal(cwd: &Path, turn_id: &str) -> Result<Proposal> {
     let snapshot = crate::manager::snapshot(cwd)?;
     let response = prompt(cwd, &snapshot, "Create a proposal for human review. Return only a JSON object with objective (string), target_branch (branch name on origin), exclusions (array of strings), criteria (array of {id,description}), checks (array of {id,criterion_ids,argv}, argv is an exact executable and arguments), and tasks (array of {id,instructions,dependencies}). Criteria, checks and tasks must be nonempty. IDs must be unique, references must exist, and task dependencies must be acyclic. Do not choose a repository, SHA, workflow, approval, publication or merge flags.").await?;
-    let draft: Draft = serde_json::from_str(response.trim())
-        .map_err(|e| CruiseError::Other(format!("invalid Manager proposal JSON: {e}")))?;
+    let response = response.trim();
+    let draft: Draft = serde_json::from_str(response).map_err(|e| {
+        const FENCE_MARKERS: [&str; 2] = ["```", "~~~"];
+        let start = proposal_response_edge(
+            response.chars().next(),
+            FENCE_MARKERS
+                .into_iter()
+                .any(|marker| response.starts_with(marker)),
+        );
+        let end = proposal_response_edge(
+            response.chars().next_back(),
+            FENCE_MARKERS
+                .into_iter()
+                .any(|marker| response.ends_with(marker)),
+        );
+        let fence_marker = FENCE_MARKERS
+            .into_iter()
+            .any(|marker| response.contains(marker));
+        eprintln!(
+            "Manager proposal turn {turn_id} invalid JSON response shape: bytes={} start={start} end={end} fence_marker={fence_marker}",
+            response.len(),
+        );
+        CruiseError::Other(format!("invalid Manager proposal JSON: {e}"))
+    })?;
     if draft.target_branch.is_empty()
         || draft.target_branch.starts_with('-')
         || draft.target_branch.contains(['\n', '\r'])

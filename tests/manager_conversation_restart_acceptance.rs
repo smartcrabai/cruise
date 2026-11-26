@@ -4,7 +4,10 @@ use serde_json::{Value, json};
 use std::{
     fs,
     io::{BufReader, Write},
-    os::unix::{fs::PermissionsExt, net::UnixListener},
+    os::unix::{
+        fs::PermissionsExt,
+        net::{UnixListener, UnixStream},
+    },
     path::Path,
     process::{Child, Command, Output, Stdio},
     time::{Duration, Instant},
@@ -15,6 +18,7 @@ use jcode_sdk::api::{
 };
 
 const FAKE_JCODE: &str = "CRUISE_TEST_MANAGER_FAKE_JCODE";
+const VALID_PROPOSAL: &str = r#"{"objective":"Deliver goal","target_branch":"main","exclusions":[],"criteria":[{"id":"c","description":"Works"}],"checks":[{"id":"check","criterion_ids":["c"],"argv":["true"]}],"tasks":[{"id":"task","instructions":"Implement","dependencies":[]}]}"#;
 
 fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
@@ -606,6 +610,134 @@ async fn propose_prints_preview_and_revision_bound_approval_command_without_appr
     assert_eq!(&after_say["proposal"], proposal);
 }
 
+#[tokio::test]
+async fn propose_logs_only_response_shape_when_json_parsing_fails() {
+    let (root, repo) = cli_fixture();
+    let home = root.path();
+    let _stop = Stop(home);
+    let (origin, token) = start(home, true);
+    let client = daemon_client();
+    let release = home.join("release-jcode");
+    let daemon_log = home.join("state/cruise/daemon/daemon.log");
+    let marker = "invalid JSON response shape: ";
+
+    fs::write(&release, "release").unwrap_or_else(|error| panic!("release fake provider: {error}"));
+    cli_stdout(
+        &ManagerCli::spawn(home, &repo, &["propose"], None)
+            .finish()
+            .await,
+    );
+    let proposed = snapshot(&client, &origin, &token, &repo).await;
+    assert_eq!(proposed["proposal"]["objective"], "Deliver goal");
+
+    let mut expected_shapes = Vec::new();
+    for (fixture, expected_error, expected_shape) in [
+        ("missing-branch", "invalid proposal target branch", None),
+        (
+            "prose",
+            "invalid Manager proposal JSON",
+            Some("bytes=17 start=text end=object_close fence_marker=false"),
+        ),
+        (
+            "fenced",
+            "invalid Manager proposal JSON",
+            Some("bytes=35 start=fence end=fence fence_marker=true"),
+        ),
+        (
+            "two-messages",
+            "invalid Manager proposal JSON",
+            Some("bytes=20 start=text end=text fence_marker=false"),
+        ),
+    ] {
+        fs::write(&release, fixture).unwrap_or_else(|error| panic!("set fake response: {error}"));
+        let output = ManagerCli::spawn(home, &repo, &["propose"], None)
+            .finish()
+            .await;
+        assert!(output.status.code().is_some_and(|code| code != 0));
+        let cli = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(cli.contains(expected_error), "{fixture}: {cli}");
+        let failed = snapshot(&client, &origin, &token, &repo).await;
+        assert_eq!(failed["proposal"], proposed["proposal"]);
+        assert_eq!(
+            transcript(&failed).last().map(|t| &t["status"]),
+            Some(&json!("interrupted"))
+        );
+        no_children(home, &failed);
+
+        expected_shapes.extend(expected_shape);
+        let log = fs::read_to_string(&daemon_log)
+            .unwrap_or_else(|error| panic!("read isolated daemon log: {error}"));
+        let shapes: Vec<_> = log
+            .lines()
+            .filter_map(|line| line.split_once(marker).map(|(_, shape)| shape))
+            .collect();
+        assert_eq!(shapes, expected_shapes, "{fixture}");
+        let persisted = failed.to_string();
+        assert!(!cli.contains(marker) && !persisted.contains(marker));
+        for sentinel in [
+            "FixturePreface",
+            "FixtureFence",
+            "FixtureEarlierProposal",
+            "FixtureTrailingReply",
+        ] {
+            assert!(!log.contains(sentinel), "{fixture}: daemon log leaked text");
+            assert!(!cli.contains(sentinel), "{fixture}: CLI leaked text");
+            assert!(
+                !persisted.contains(sentinel),
+                "{fixture}: snapshot leaked text"
+            );
+        }
+    }
+}
+
+fn send_fake_reply(socket: &mut UnixStream, session_id: &str, fixture: &str, proposal: bool) {
+    let alternate = match fixture {
+        "missing-branch" => {
+            VALID_PROPOSAL.replace(r#""target_branch":"main""#, r#""target_branch":"""#)
+        }
+        "two-messages" => VALID_PROPOSAL.replace("Deliver goal", "FixtureEarlierProposal"),
+        _ => String::new(),
+    };
+    let invalid_target = [alternate.as_str()];
+    let two_messages = [alternate.as_str(), "FixtureTrailingReply"];
+    let outputs: &[&str] = if proposal {
+        match fixture {
+            "missing-branch" => &invalid_target,
+            "prose" => &[" \nFixturePreface\n{}\r\n "],
+            "fenced" => &["```json\n{\"note\":\"FixtureFence\"}\n```"],
+            "two-messages" => &two_messages,
+            _ => &[VALID_PROPOSAL],
+        }
+    } else {
+        &["Discussed goal"]
+    };
+    let events = std::iter::once(json!({"ev":"message_accepted","session_id":session_id}))
+        .chain(outputs.iter().flat_map(|output| {
+            [
+                json!({"ev":"text_delta","session_id":session_id,"text":output}),
+                json!({"ev":"text_done","session_id":session_id}),
+            ]
+        }))
+        .chain(std::iter::once(
+            json!({"ev":"turn_done","session_id":session_id}),
+        ));
+    for value in events {
+        write_frame(
+            socket,
+            &ServerFrame {
+                v: API_VERSION_MAJOR,
+                reply_to: None,
+                event: event(value),
+            },
+        )
+        .unwrap_or_else(|error| panic!("write fake Jcode event: {error}"));
+    }
+}
+
 #[test]
 #[ignore = "subprocess-only fake jcode runtime"]
 fn manager_fake_jcode_runtime() {
@@ -648,27 +780,10 @@ fn manager_fake_jcode_runtime() {
                 release_path.exists(),
                 "timed out waiting to release fake Jcode"
             );
-            let output = if serialized.contains("Create a proposal for human review") {
-                r#"{"objective":"Deliver goal","target_branch":"main","exclusions":[],"criteria":[{"id":"c","description":"Works"}],"checks":[{"id":"check","criterion_ids":["c"],"argv":["true"]}],"tasks":[{"id":"task","instructions":"Implement","dependencies":[]}]}"#
-            } else {
-                "Discussed goal"
-            };
-            for value in [
-                json!({"ev":"message_accepted","session_id":session_id}),
-                json!({"ev":"text_delta","session_id":session_id,"text":output}),
-                json!({"ev":"text_done","session_id":session_id}),
-                json!({"ev":"turn_done","session_id":session_id}),
-            ] {
-                write_frame(
-                    &mut socket,
-                    &ServerFrame {
-                        v: API_VERSION_MAJOR,
-                        reply_to: None,
-                        event: event(value),
-                    },
-                )
-                .unwrap_or_else(|error| panic!("write fake Jcode event: {error}"));
-            }
+            let fixture = fs::read_to_string(release_path)
+                .unwrap_or_else(|error| panic!("read fake response fixture: {error}"));
+            let proposal = serialized.contains("Create a proposal for human review");
+            send_fake_reply(&mut socket, session_id, &fixture, proposal);
             continue;
         }
         let reply = match &frame.request {

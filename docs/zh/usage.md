@@ -25,6 +25,8 @@ cruise daemon serve
 daemon registry 和日志位于 `$XDG_STATE_HOME/cruise/daemon/`（通常为 `~/.local/state/cruise/daemon/`）。`instance.json` 的权限为 `0600`，其中包含随机 API token；daemon 日志写入 `daemon.log`。请妥善保管此目录。没有开机启动服务，也不会在空闲时自动退出；registry 记录被删除时 daemon 才会退出。旧的 `cruise webui start|stop|restart|status` 命令已移除，请改用 `cruise daemon ...`。
 Detached daemon 每 60 秒检查一次 `daemon.log`。日志超过 5 MiB 时，会用当前日志替换 `daemon.log.1`，然后截断实时日志；仅保留一代轮转日志。
 
+如果 `cruise manager propose` 无法解析 JSON，daemon 会记录 `invalid JSON response shape`，包含选定回复去除首尾空白后的字节数、首尾的固定类别，以及是否包含反引号或波浪号围栏标记。该诊断不记录回复正文，也不改变 turn 的错误或已保存的 proposal。
+
 从 v0.3.0 分离式 WebUI 升级时，只要旧服务器仍在运行，daemon 的 start、restart、serve 以及客户端自动启动都会被拒绝。请先运行 `cruise daemon stop`；它也会停止旧服务器并取消正在执行的工作，使 session 进入 `Suspended`，之后可用 `cruise run <id>` 恢复。`cruise daemon status` 会报告运行中的旧服务器；启动 daemon 时会清理已停止进程的旧 registry。
 
 此外，若某个 session 仍由另一个被记录为 runner 的 cruise 进程执行（例如升级时仍在进行的 v0.3.0 `cruise run`），daemon 会拒绝对它进行 run 和 planning（HTTP 409，CLI 退出码 1，不修改 state）。v0.3.0 的后台 planning worker 不记录 runner，无法检测，因此请等升级前启动的后台 plan 完成后再操作这些 session。

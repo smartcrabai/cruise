@@ -25,6 +25,8 @@ cruise daemon serve
 daemon registry と log は `$XDG_STATE_HOME/cruise/daemon/`（通常 `~/.local/state/cruise/daemon/`）にあります。`instance.json` は mode `0600` で、ランダムな API token を含みます。`daemon.log` に daemon log が記録されます。この directory は非公開に保ってください。起動時サービスのインストールも idle 時の自動終了もありません。registry record が削除されると daemon は終了します。従来の `cruise webui start|stop|restart|status` command は削除されました。`cruise daemon ...` を使ってください。
 Detached daemon は 60 秒ごとに `daemon.log` を確認します。5 MiB を超えると、現在の log で `daemon.log.1` を置き換えて live log を truncate します。rotation は 1 世代だけ保持します。
 
+`cruise manager propose` の JSON 解析に失敗すると、daemon は `invalid JSON response shape` として、採用した応答の前後の空白を除いたバイト数、先頭・末尾の固定カテゴリ、バッククォートまたはチルダのフェンス記号の有無を記録します。この診断に応答本文は含まれず、turn のエラーや保存済み proposal は変わりません。
+
 v0.3.0 の分離 WebUI から更新する場合、旧 server が稼働中の間は `daemon start`、`restart`、`serve` と client の自動起動を拒否します。先に `cruise daemon stop` を実行してください。旧 server の停止では実行中の作業を cancel し、session は `Suspended` になります。`cruise run <id>` で再開できます。`cruise daemon status` は稼働中の旧 server を表示し、daemon 起動時には停止済みの旧 registry を削除します。
 
 また、別の cruise process が runner として記録され実行中の session（更新時に進行中だった v0.3.0 の `cruise run` など）に対する run と planning を daemon は拒否します（HTTP 409、CLI は exit 1、state は変更しません）。v0.3.0 の background planning worker は runner を記録しないため検出できません。更新前に開始した background plan は完了を待ってから操作してください。
