@@ -10,6 +10,7 @@ export default function ManagerGoal(props) {
     <p class="font-mono text-sm break-all">{props.goal.id}</p>
     {props.goal.reason && <p class="whitespace-pre-wrap break-words">{props.goal.reason}</p>}
     {props.goal.execution.integrated_tip && <p class="text-sm">{props.t.manager.integrated_tip}: <code class="break-all">{props.goal.execution.integrated_tip}</code></p>}
+    {props.goal.execution.effective_base && <p class="text-sm">{props.t.manager.target}: <code class="break-all">{props.goal.execution.effective_base}</code></p>}
     <div class="flex flex-wrap gap-2">
       {props.goal.status !== "completed" && <form hx-post={`/webui/manager/${props.key}/${props.goal.status === "paused" ? "resume" : "pause"}`} hx-swap="none" hx-disable="this">
         <input type="hidden" name="goal_id" value={props.goal.id} />

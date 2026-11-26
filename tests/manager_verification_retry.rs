@@ -55,11 +55,16 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(out.stdout)?.trim().to_owned())
 }
 
-fn record_path(home: &Path, common: &Path) -> Result<std::path::PathBuf> {
+fn sha256(bytes: &[u8]) -> Result<String> {
     let mut key = String::with_capacity(64);
-    for byte in Sha256::digest(common.to_string_lossy().as_bytes()) {
+    for byte in Sha256::digest(bytes) {
         write!(key, "{byte:02x}")?;
     }
+    Ok(key)
+}
+
+fn record_path(home: &Path, common: &Path) -> Result<std::path::PathBuf> {
+    let key = sha256(common.to_string_lossy().as_bytes())?;
     Ok(home.join("data/cruise/manager").join(format!("{key}.json")))
 }
 
@@ -245,7 +250,22 @@ mod github_publication {
 export PATH="${PATH#*:}"
 case "$1" in
   ls-remote) test "$3" = origin || exit 2; exec git ls-remote --heads "$HOME/remote" "$4";;
-  push|fetch) exit 2;;
+  fetch)
+    test -f "$HOME/retarget-fixture" || exit 2
+    test "$#" = 10 && test "$9" = origin || exit 2
+    exec git fetch "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$HOME/remote" "${10}"
+    ;;
+  push)
+    test -f "$HOME/retarget-fixture" && test "$#" = 3 && test "$2" = origin || exit 2
+    printf '%s\n' "$3" >> "$HOME/pushes"
+    git push "$HOME/remote" "$3" || exit $?
+    if [ -f "$HOME/after-push-drift" ]; then
+      git --git-dir="$HOME/remote" update-ref refs/heads/main "$(cat "$HOME/after-push-drift")" || exit $?
+    fi
+    touch "$HOME/pushed"
+    if [ -f "$HOME/hold-push" ]; then while :; do sleep 1; done; fi
+    exit 0
+    ;;
 esac
 exec git "$@"
 "#,
@@ -258,7 +278,14 @@ set -eu
 if [ "$1 $2 $3" = 'api --hostname github.com' ]; then
   if [ "$4" = user ]; then
     if [ -f "$HOME/auth-error" ]; then echo 'HTTP 401' >&2; exit 1; fi
+    if [ -f "$HOME/other-user" ]; then echo '{"id":2}'; exit; fi
     echo '{"id":1}'
+    exit
+  fi
+  if [ -f "$HOME/retarget-fixture" ] && [ "$4" = repos/example/project/pulls/1 ]; then
+    pr=$(cat "$HOME/listed-legacy")
+    pr=${pr#\[}
+    printf '%s\n' "${pr%\]}"
     exit
   fi
   [ "$4 $5" = '--paginate repos/example/project/pulls?state=all&per_page=100' ]
@@ -275,6 +302,15 @@ else
     timeout) echo 'request timed out' >&2; exit 1;;
     rejected) echo 'pull request create failed: GraphQL: Title is too long (maximum is 256 characters) (createPullRequest)' >&2; exit 1;;
   esac
+  if [ -f "$HOME/retarget-fixture" ]; then
+    if [ -f "$HOME/create-timeout" ]; then echo 'request timed out' >&2; exit 1; fi
+    sha=$(git --git-dir="$HOME/remote" rev-parse "refs/heads/$6")
+    printf '[{"number":1,"html_url":"https://github.com/example/project/pull/1","state":"open","merged_at":null,"head":{"ref":"%s","sha":"%s","repo":{"full_name":"example/project"}},"base":{"ref":"%s","repo":{"full_name":"example/project"}}}]\n' \
+      "$6" "$sha" "$8" > "$HOME/staged-$id"
+    mv "$HOME/staged-$id" "$HOME/listed-$id"
+    if [ -f "$HOME/hold-create" ]; then while :; do sleep 1; done; fi
+    exit 0
+  fi
   cp "$HOME/pr-$id" "$HOME/staged-$id"
   mv "$HOME/staged-$id" "$HOME/listed-$id"
 fi
@@ -585,6 +621,405 @@ fi
                 );
             }
             assert_eq!(goal_in(record, id)?["proposal"]["objective"], *original);
+        }
+        Ok(())
+    }
+
+    const HEAD: &str = "refs/heads/cruise/goal/legacy";
+    const MAIN: &str = "refs/heads/main";
+    const TRACKING: &str = "refs/remotes/origin/main";
+
+    struct RetargetFixture {
+        git: LocalGit,
+        record: std::path::PathBuf,
+        writer: std::path::PathBuf,
+        new_base: String,
+        objective: String,
+    }
+
+    impl RetargetFixture {
+        fn new(home: &Path) -> Result<Self> {
+            let git_repo = setup_git(home)?;
+            let objective = "Long objective. ".repeat(20);
+            let (record, _) = seed_goals(
+                home,
+                &git_repo,
+                &["Short".into(), objective.clone(), objective.clone()],
+            )?;
+            let mut snapshot: Value = serde_json::from_slice(&fs::read(&record)?)?;
+            let mut goal = goal_in(&record, "legacy")?;
+            let script = r#"
+                tip=$(git rev-parse HEAD) || exit
+                printf '%s:%s:%s\n' "$1" "$2" "$tip" >> "$HOME/checks"
+                if [ "$1" = second ]; then
+                    if [ -f "$HOME/drift" ]; then
+                        git --git-dir="$HOME/remote" update-ref refs/heads/main "$(cat "$HOME/drift")" || exit
+                    fi
+                    if [ -f "$HOME/check-error" ]; then exit 7; fi
+                fi
+            "#;
+            let mut checks = Vec::new();
+            let mut evidence = Vec::new();
+            for check_id in ["first", "second"] {
+                let argv = json!(["sh", "-c", script, "check", check_id, "approved argument"]);
+                checks.push(json!({"id":check_id,"criterion_ids":["c"],"argv":argv}));
+                let mut passed = goal["execution"]["publication"]["checks"][0].clone();
+                passed["check_id"] = json!(check_id);
+                passed["argv"] = argv;
+                evidence.push(passed);
+            }
+            goal["proposal"]["checks"] = json!(checks);
+            goal["execution"]["publication"]["checks"] = json!(evidence);
+            goal["execution"]["publication"]["contract_revision"] = json!(1);
+            let amendment = json!({"id":"amendment","revision":1,"goal_id":"legacy",
+                "integrated_tip":git_repo.tip,"amendment":[{"criterion":"c",
+                "old_sha256":sha256(b"unchanged contract")?,
+                "replace":"unchanged contract","with":"reviewed contract"}]});
+            goal["execution"]["corrective_approvals"] = json!([amendment]);
+            let mut failed_attempt = goal["execution"]["attempts"][0].clone();
+            failed_attempt["session_id"] = json!("earlier-attempt");
+            failed_attempt["integrated"] = json!(false);
+            failed_attempt["result_sha"] = Value::Null;
+            goal["execution"]["attempts"][0]["attempt"] = json!(2);
+            goal["execution"]["attempts"] =
+                json!([failed_attempt, goal["execution"]["attempts"][0]]);
+            snapshot["goals"] = json!([
+                goal,
+                goal_in(&record, "existing")?,
+                goal_in(&record, "unproven")?,
+                goal_in(&record, "moved-head")?,
+                goal_in(&record, "missing-checks")?
+            ]);
+            let snapshot: cruise::manager::Snapshot = serde_json::from_value(snapshot)?;
+            fs::write(&record, serde_json::to_vec(&snapshot)?)?;
+            let writer = home.join("writer");
+            git(
+                home,
+                &[
+                    "clone",
+                    "-qb",
+                    "main",
+                    &git_repo.remote.to_string_lossy(),
+                    &writer.to_string_lossy(),
+                ],
+            )?;
+            git(&writer, &["config", "user.name", "Test"])?;
+            git(&writer, &["config", "user.email", "test@example.test"])?;
+            fs::write(writer.join("upstream"), "new upstream content\n")?;
+            git(&writer, &["add", "upstream"])?;
+            git(&writer, &["commit", "-qm", "Advance target"])?;
+            git(&writer, &["push", "origin", MAIN])?;
+            let new_base = git(&writer, &["rev-parse", "HEAD"])?;
+            git(&git_repo.repo, &["update-ref", TRACKING, &git_repo.base])?;
+            forge_fixtures(home)?;
+            fs::write(home.join("retarget-fixture"), "")?;
+            Ok(Self {
+                git: git_repo,
+                record,
+                writer,
+                new_base,
+                objective,
+            })
+        }
+
+        fn preview(&self, home: &Path, id: &str) -> Result<std::process::Output> {
+            command_at(
+                home,
+                &self.git.repo,
+                &["manager", "corrective", id, "--retarget"],
+            )
+        }
+
+        fn approve(&self, home: &Path, revision: u64) -> Result<std::process::Output> {
+            command_at(
+                home,
+                &self.git.repo,
+                &[
+                    "manager",
+                    "approve-corrective",
+                    "legacy",
+                    "--yes",
+                    "--revision",
+                    &revision.to_string(),
+                ],
+            )
+        }
+
+        fn goal(&self) -> Result<Value> {
+            goal_in(&self.record, "legacy")
+        }
+
+        fn refs_unchanged(&self) -> Result<()> {
+            assert_eq!(git(&self.git.repo, &["rev-parse", HEAD])?, self.git.tip);
+            assert_eq!(
+                git(&self.git.repo, &["rev-parse", TRACKING])?,
+                self.git.base
+            );
+            assert_eq!(git(&self.git.remote, &["rev-parse", HEAD])?, self.git.tip);
+            Ok(())
+        }
+    }
+
+    async fn wait_until(mut complete: impl FnMut() -> Result<bool>) -> Result<()> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while !complete()? {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "retarget transition timed out"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Ok(())
+    }
+
+    fn succeeded(out: std::process::Output) -> String {
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap_or_else(|e| panic!("invalid CLI output: {e}"))
+    }
+
+    #[tokio::test]
+    async fn approved_retarget_preserves_history_and_recovers_remote_intents_once() -> Result<()> {
+        let root = TempDir::new()?;
+        let home = root.path();
+        let f = RetargetFixture::new(home)?;
+        let before = f.goal()?;
+        fs::write(home.join("hold-push"), "")?;
+        fs::write(home.join("hold-create"), "")?;
+        let (stop, instance, client) = start_daemon(home)?;
+
+        let text = succeeded(f.preview(home, "legacy")?);
+        assert!(text.contains("Advance target") && text.contains("upstream"));
+        let staged = f.goal()?;
+        let preview = &staged["execution"]["corrective_preview"];
+        assert_eq!(preview["retarget"]["new_base"], f.new_base);
+        assert_eq!(preview["retarget"]["old_base"], f.git.base);
+        assert_eq!(preview["integrated_tip"], f.git.tip);
+        assert_eq!(preview["contract_revision"], 1);
+        let mut unchanged = staged.clone();
+        unchanged["execution"]["corrective_preview"] = Value::Null;
+        assert_eq!(unchanged, before);
+        f.refs_unchanged()?;
+        assert!(!home.join("checks").exists());
+        assert!(!home.join("pushes").exists());
+        let revision = preview["revision"].as_u64().ok_or("missing revision")?;
+        succeeded(f.approve(home, revision)?);
+        wait_until(|| Ok(home.join("pushed").exists())).await?;
+        assert_eq!(f.goal()?["execution"]["publication"]["phase"], "PushIntent");
+        let duplicate = client
+            .post(format!(
+                "{}api/manager/action",
+                instance["origin"].as_str().ok_or("missing origin")?
+            ))
+            .bearer_auth(instance["token"].as_str().ok_or("missing token")?)
+            .json(
+                &json!({"cwd":f.git.repo,"action":{"type":"approve_corrective","goal_id":"legacy",
+                "preview_id":preview["id"],"revision":revision}}),
+            )
+            .send()
+            .await?;
+        assert_eq!(duplicate.status(), StatusCode::ACCEPTED);
+        drop(stop);
+
+        let (stop, _, _) = start_daemon(home)?;
+        wait_until(|| Ok(home.join("listed-legacy").exists())).await?;
+        assert_eq!(
+            f.goal()?["execution"]["publication"]["phase"],
+            "CreateIntent"
+        );
+        drop(stop);
+        let (_stop, _, _) = start_daemon(home)?;
+        wait_until(|| Ok(f.goal()?["status"] == "awaiting_merge")).await?;
+        let after = f.goal()?;
+        assert_retarget_publication(home, &f, &before, preview, &after)
+    }
+
+    fn assert_retarget_publication(
+        home: &Path,
+        f: &RetargetFixture,
+        before: &Value,
+        preview: &Value,
+        after: &Value,
+    ) -> Result<()> {
+        let tip = after["execution"]["integrated_tip"]
+            .as_str()
+            .ok_or("missing tip")?;
+        assert_eq!(
+            git(&f.git.repo, &["show", "-s", "--format=%P", tip])?,
+            format!("{} {}", f.git.tip, f.new_base)
+        );
+        assert_eq!(git(&f.git.remote, &["rev-parse", HEAD])?, tip);
+        assert_eq!(git(&f.git.remote, &["rev-parse", MAIN])?, f.new_base);
+        assert_eq!(git(&f.git.repo, &["rev-parse", TRACKING])?, f.git.base);
+        assert_eq!(after["proposal"], before["proposal"]);
+        assert_eq!(
+            after["execution"]["attempts"],
+            before["execution"]["attempts"]
+        );
+        assert_eq!(
+            after["execution"]["corrective_approvals"],
+            json!([before["execution"]["corrective_approvals"][0], preview])
+        );
+        assert_eq!(
+            after["execution"]["publication_history"],
+            json!([before["execution"]["publication"]])
+        );
+        let current = &after["execution"]["publication"];
+        assert_eq!(current["request"]["head_sha"], tip);
+        for (fresh, prior) in current["checks"]
+            .as_array()
+            .ok_or("missing checks")?
+            .iter()
+            .zip(
+                before["execution"]["publication"]["checks"]
+                    .as_array()
+                    .ok_or("missing prior evidence")?,
+            )
+        {
+            assert_eq!(fresh["verified_tip"], tip);
+            assert_eq!(fresh["argv"], prior["argv"]);
+            assert_eq!(fresh["exit_code"], 0);
+            assert_ne!(fresh["stdout_log"], prior["stdout_log"]);
+        }
+        assert_eq!(
+            fs::read_to_string(home.join("checks"))?,
+            format!("first:approved argument:{tip}\nsecond:approved argument:{tip}\n")
+        );
+        assert_eq!(
+            fs::read_to_string(home.join("pushes"))?,
+            format!("{tip}:{HEAD}\n")
+        );
+        assert_eq!(fs::read_to_string(home.join("attempt-legacy"))?, "create\n");
+        assert_eq!(
+            fs::read_to_string(home.join("title-legacy"))?
+                .chars()
+                .count(),
+            256
+        );
+        assert!(fs::read_to_string(home.join("body-legacy"))?.contains(&f.objective));
+        Ok(())
+    }
+
+    #[test]
+    fn retarget_refuses_conflict_stale_refs_prs_and_unproven_absence() -> Result<()> {
+        let root = TempDir::new()?;
+        let home = root.path();
+        let f = RetargetFixture::new(home)?;
+        let (_stop, _, _) = start_daemon(home)?;
+        for id in ["existing", "unproven", "moved-head", "missing-checks"] {
+            let saved = goal_in(&f.record, id)?;
+            assert!(!f.preview(home, id)?.status.success(), "{id} accepted");
+            assert_eq!(goal_in(&f.record, id)?, saved);
+        }
+        succeeded(f.preview(home, "legacy")?);
+        let reviewed = f.goal()?;
+        let revision = reviewed["execution"]["corrective_preview"]["revision"]
+            .as_u64()
+            .ok_or("missing revision")?;
+        for fault in ["lookup-error", "auth-error", "other-user", "listed-legacy"] {
+            let contents = if fault == "listed-legacy" {
+                fs::read(home.join("pr-legacy"))?
+            } else {
+                Vec::new()
+            };
+            fs::write(home.join(fault), contents)?;
+            assert!(
+                !f.approve(home, revision)?.status.success(),
+                "{fault} accepted"
+            );
+            assert_eq!(f.goal()?, reviewed);
+            fs::remove_file(home.join(fault))?;
+        }
+        fs::write(f.writer.join("file"), "conflicting upstream edit\n")?;
+        git(&f.writer, &["commit", "-qam", "Conflicting edit"])?;
+        git(&f.writer, &["push", "origin", MAIN])?;
+        assert!(!f.approve(home, revision)?.status.success());
+        assert_eq!(f.goal()?, reviewed);
+        let text = succeeded(f.preview(home, "legacy")?);
+        assert!(text.contains("CONFLICT") && text.contains("Conflicting edit"));
+        let conflict = f.goal()?;
+        assert_eq!(
+            conflict["execution"]["corrective_discarded"],
+            json!([reviewed["execution"]["corrective_preview"]])
+        );
+        let current = conflict["execution"]["corrective_preview"]["revision"]
+            .as_u64()
+            .ok_or("missing revision")?;
+        assert!(!f.approve(home, revision)?.status.success());
+        assert!(!f.approve(home, current)?.status.success());
+        assert_eq!(f.goal()?, conflict);
+        let tree = git(&f.writer, &["rev-parse", "HEAD^{tree}"])?;
+        let unrelated = git(&f.writer, &["commit-tree", &tree, "-m", "Unrelated root"])?;
+        git(
+            &f.writer,
+            &["push", "origin", &format!("+{unrelated}:{MAIN}")],
+        )?;
+        let output = f.preview(home, "legacy")?;
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("not a fast-forward"));
+        assert_eq!(f.goal()?, conflict);
+        f.refs_unchanged()?;
+        assert!(!home.join("checks").exists());
+        assert!(!home.join("attempt-legacy").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retarget_stops_on_red_checks_remote_drift_or_uncertain_create() -> Result<()> {
+        for (fault, phase, reason) in [
+            ("check-error", "Ready", "second failed"),
+            ("drift", "Verified", "Remote ref main differs"),
+            ("after-push-drift", "Pushed", "Remote ref main differs"),
+            ("create-timeout", "CreateIntent", "outcome uncertain"),
+        ] {
+            let root = TempDir::new()?;
+            let home = root.path();
+            let f = RetargetFixture::new(home)?;
+            fs::write(home.join(fault), &f.git.base)?;
+            let (stop, _, _) = start_daemon(home)?;
+            succeeded(f.preview(home, "legacy")?);
+            let revision = f.goal()?["execution"]["corrective_preview"]["revision"]
+                .as_u64()
+                .ok_or("missing revision")?;
+            succeeded(f.approve(home, revision)?);
+            wait_until(|| Ok(f.goal()?["status"] == "blocked")).await?;
+            let blocked = f.goal()?;
+            assert_eq!(
+                blocked["execution"]["publication"]["phase"], phase,
+                "{blocked}"
+            );
+            assert!(
+                blocked["reason"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains(reason),
+                "{blocked}"
+            );
+            drop(stop);
+            let (_stop, _, _) = start_daemon(home)?;
+            assert_eq!(f.goal()?, blocked);
+            if fault == "create-timeout" {
+                let retry = command_at(home, &f.git.repo, &["manager", "retry", "legacy"])?;
+                assert!(!retry.status.success());
+                assert_eq!(fs::read_to_string(home.join("attempt-legacy"))?, "create\n");
+            } else if fault == "after-push-drift" {
+                let tip = blocked["execution"]["integrated_tip"]
+                    .as_str()
+                    .ok_or("missing tip")?;
+                assert_eq!(git(&f.git.remote, &["rev-parse", HEAD])?, tip);
+                assert_eq!(
+                    fs::read_to_string(home.join("pushes"))?,
+                    format!("{tip}:{HEAD}\n")
+                );
+                assert!(!home.join("attempt-legacy").exists());
+            } else {
+                assert!(!home.join("pushes").exists());
+                assert!(!home.join("attempt-legacy").exists());
+                assert_eq!(git(&f.git.remote, &["rev-parse", HEAD])?, f.git.tip);
+            }
         }
         Ok(())
     }

@@ -196,7 +196,7 @@ fn manager_fixtures() -> Vec<(&'static str, Value)> {
         "id": "goal", "status": "active", "reason": "A task needs attention", "proposal": proposal,
         "execution": {
             "integrated_tip": "abc123", "can_retry_verification": false, "can_preview_corrective": false,
-            "publication": null, "corrective_preview": null,
+            "publication": null, "corrective_preview": null, "effective_base": null,
             "attempts": [{"task_id": "implement", "attempt": 1, "session_id": "child", "integrated": false,
                 "child_state": {"phase": "Failed", "failure": "Command failed"}, "can_resume": true, "can_retry": true}],
         },

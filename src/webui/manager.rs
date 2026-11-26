@@ -234,15 +234,27 @@ fn goal_controls(value: &mut Value) -> Result<()> {
     value["execution"]["can_retry_verification"] = json!(can_retry_verification);
     value["execution"]["can_preview_corrective"] =
         json!(crate::manager_publication::corrective_tip(&goal).is_ok());
+    value["execution"]["effective_base"] = json!(
+        execution
+            .retarget
+            .as_ref()
+            .filter(|run| run.applied)
+            .map(|_| goal.effective_base())
+    );
     if let Some(preview) = &execution.corrective_preview {
-        let (title, summary) = corrective_summary(&preview.correction);
+        let (title, summary) = corrective_summary(preview);
         value["execution"]["corrective_preview"]["title"] = json!(title);
         value["execution"]["corrective_preview"]["summary"] = json!(summary);
-        // The daemon decides on approval; only a task preview has a state to pre-check.
-        value["execution"]["can_approve_corrective"] = json!(
-            !matches!(preview.correction, Correction::Task(_))
-                || crate::manager_publication::corrective_tip(&goal).is_ok()
-        );
+        let can_approve = match &preview.correction {
+            Correction::Task(_) => crate::manager_publication::corrective_tip(&goal).is_ok(),
+            Correction::Retarget(reviewed) => {
+                reviewed.conflict.is_none()
+                    && reviewed.merge_tree.is_some()
+                    && crate::manager_publication::can_retry_title_rejection(&goal)
+            }
+            _ => true,
+        };
+        value["execution"]["can_approve_corrective"] = json!(can_approve);
     }
     if let Some(attempts) = value["execution"]["attempts"].as_array_mut() {
         for (attempt, data) in execution.attempts.iter().zip(attempts) {
@@ -284,8 +296,8 @@ fn goal_controls(value: &mut Value) -> Result<()> {
 }
 
 /// Title and body of a corrective preview for the review panel: only reviewed data.
-fn corrective_summary(correction: &Correction) -> (String, String) {
-    match correction {
+fn corrective_summary(preview: &manager::CorrectivePreview) -> (String, String) {
+    match &preview.correction {
         Correction::Task(task) => (task.id.clone(), task.instructions.clone()),
         Correction::Amendment(edits) => {
             let ids: Vec<&str> = edits.iter().map(|edit| edit.target.label().1).collect();
@@ -321,6 +333,23 @@ fn corrective_summary(correction: &Correction) -> (String, String) {
                 ),
             )
         }
+        Correction::Retarget(reviewed) => (
+            format!("{} · {}", reviewed.repository, reviewed.target_ref),
+            format!(
+                "Goal: {}\nGoal tip: {}\nProposal revision: {}\nContract revision: {}\n{} → {}\n\n{}\nVerification SHA-256: {}\n\nCommits:\n{}\n\nChanged files:\n{}\n\nMerge conflicts: {}",
+                preview.goal_id,
+                preview.integrated_tip,
+                reviewed.proposal_revision,
+                preview.contract_revision,
+                reviewed.old_base,
+                reviewed.new_base,
+                reviewed.publication_rejection,
+                reviewed.publication_digest,
+                reviewed.commits,
+                reviewed.files,
+                reviewed.conflict.as_deref().unwrap_or("none")
+            ),
+        ),
     }
 }
 

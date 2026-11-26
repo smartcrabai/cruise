@@ -786,6 +786,21 @@ pub(crate) fn validate_execution_contract(goal: &Goal) -> Result<()> {
             "Goal execution settings differ from the reviewed contract".into(),
         ));
     }
+    let mut retargets = goal
+        .execution
+        .corrective_approvals
+        .iter()
+        .filter_map(|preview| {
+            matches!(preview.correction, manager::Correction::Retarget(_))
+                .then_some(preview.revision)
+        });
+    if retargets.next() != goal.execution.retarget.as_ref().map(|run| run.revision)
+        || retargets.next().is_some()
+    {
+        return Err(CruiseError::Other(
+            "Goal is missing a matching approved retarget intent".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -1242,7 +1257,7 @@ fn validate_goal_tip<'a>(goal: &'a Goal, anchor: &Path) -> Result<&'a String> {
     let reference = format!("refs/heads/cruise/goal/{}", goal.id);
     // Initializing this ref is only allowed from the approved target, before
     // any task was reserved. Existing refs must match the durable exact tip.
-    if goal.execution.attempts.is_empty() && tip == &goal.proposal.target_sha {
+    if goal.execution.attempts.is_empty() && tip == goal.effective_base() {
         crate::manager_git::initialize(anchor, &reference, tip).map_err(CruiseError::Other)?;
     }
     if git_output(anchor, &["rev-parse", "--verify", &reference])? != *tip {

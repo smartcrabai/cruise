@@ -1,6 +1,8 @@
 //! Durable, fail-closed verification and publication of a single Goal.
 //! The coordinator must serialize calls for a Goal and drain this blocking work
 //! during shutdown. An interrupted check or create is never replayed implicitly.
+
+pub(crate) mod retarget;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -177,7 +179,7 @@ fn validate(repo: &Path, goal: &Goal, p: &Publication) -> Result<()> {
         repo,
         &p.worktree,
         &format!("refs/heads/cruise/goal/{}", goal.id),
-        &goal.proposal.target_sha,
+        goal.effective_base(),
         &p.tip,
     )
     .map_err(error)
@@ -267,6 +269,11 @@ fn every_task_done(goal: &Goal) -> bool {
 /// A contract amendment must not change what a started verification or publication was
 /// run against. A Goal blocked before any push starts a fresh verification afterwards.
 pub(crate) fn validate_amendable(goal: &Goal) -> Result<()> {
+    if goal.execution.retarget.is_some() {
+        return Err(error(
+            "An approved retarget must keep its reviewed contract",
+        ));
+    }
     let phase = goal.execution.publication.as_ref().map(|p| p.phase);
     let amendable = match goal.status {
         GoalStatus::Active => phase.is_none(),
@@ -291,6 +298,11 @@ pub(crate) fn validate_amendable(goal: &Goal) -> Result<()> {
 pub(crate) fn corrective_tip(goal: &Goal) -> Result<&str> {
     if goal.status != GoalStatus::Blocked {
         return Err(error("Goal is not blocked by a failed verification"));
+    }
+    if goal.execution.retarget.is_some() {
+        return Err(error(
+            "An approved retarget cannot add or restart Goal tasks",
+        ));
     }
     crate::manager_coordinator::validate_execution_contract(goal)?;
     if !every_task_done(goal) {
@@ -347,13 +359,15 @@ pub(crate) fn can_retry_title_rejection(goal: &Goal) -> bool {
             p.phase == Phase::CreateIntent && p.forge_kind == crate::forge::ForgeKind::GitHub
         })
         && manager_forge::github_title_prefix(&goal.proposal.objective).is_some()
-        // Match the exact legacy record, not a substring of an arbitrary forge error.
-        && goal
-            .reason
-            .as_deref()
-            .and_then(|reason| reason.strip_prefix("PR create outcome uncertain (Err(\""))
-            .and_then(|reason| reason.strip_suffix("\"), lookup Ok(None)). Human resolution required"))
-            .is_some_and(is_github_title_rejection)
+        && goal.reason.as_deref().is_some_and(legacy_title_rejection)
+}
+
+fn legacy_title_rejection(reason: &str) -> bool {
+    // Match the exact legacy record, not a substring of an arbitrary forge error.
+    reason
+        .strip_prefix("PR create outcome uncertain (Err(\"")
+        .and_then(|reason| reason.strip_suffix("\"), lookup Ok(None)). Human resolution required"))
+        .is_some_and(is_github_title_rejection)
 }
 
 /// Consume the explicit retry only after reconciling the exact rejected intent.
@@ -377,7 +391,7 @@ pub(crate) fn retry_title_rejection(
         .clone()
         .ok_or_else(|| error("missing rejected publication intent"))?;
     validate_saved_intent(&context, &p)?;
-    validate_checks_complete(&context, &p)?;
+    validate_checks_complete(goal, &p)?;
     let observed =
         manager_forge::lookup_title_retry(&context.repo, &context.ctx, &p.branch, cancel)
             .map_err(|e| error(format!("Cannot reconcile rejected GitHub PR: {e}")))?;
@@ -390,7 +404,7 @@ pub(crate) fn retry_title_rejection(
     } else {
         for (branch, sha) in [
             (p.branch.as_str(), p.tip.as_str()),
-            (&goal.proposal.target_branch, &goal.proposal.target_sha),
+            (goal.proposal.target_branch.as_str(), goal.effective_base()),
         ] {
             let actual = manager_forge::remote_head(&context.repo, branch, cancel)
                 .map_err(|e| error(format!("Cannot recheck approved remote ref {branch}: {e}")))?;
@@ -485,6 +499,7 @@ pub(crate) fn reconcile(
     let cancel = &lease.token;
     match reconcile_inner(cwd, id, cancel) {
         Ok(()) => Ok(()),
+        Err(_) if cancel.is_cancelled() => Ok(()),
         Err(cause) => {
             let message = cause.to_string();
             manager::update_goal(cwd, id, |goal| {
@@ -589,7 +604,7 @@ fn gather_evidence(
                 repo: &repo,
                 worktree: &run.worktree,
                 goal_ref: &reference,
-                approved_base: &goal.proposal.target_sha,
+                approved_base: goal.effective_base(),
                 verified_tip: tip,
                 check_id,
                 argv: &check.argv,
@@ -734,7 +749,7 @@ fn prepare_reconciliation<'a>(
     id: &'a str,
     cancel: &'a crate::cancellation::CancellationToken,
 ) -> Result<Option<(Reconciliation<'a>, Publication)>> {
-    let goal = load(cwd, id)?;
+    let mut goal = load(cwd, id)?;
     if !matches!(
         goal.status,
         GoalStatus::Active | GoalStatus::Verifying | GoalStatus::AwaitingMerge
@@ -746,7 +761,21 @@ fn prepare_reconciliation<'a>(
     }
     crate::manager_coordinator::validate_execution_contract(&goal)?;
     if !goal.proposal.tasks.iter().all(|t| goal.task_done(&t.id)) {
+        if goal.execution.retarget.is_some() {
+            return Err(error(
+                "Approved retarget no longer has all its integrated tasks",
+            ));
+        }
         return Ok(None);
+    }
+    if goal
+        .execution
+        .retarget
+        .as_ref()
+        .is_some_and(|run| !run.applied)
+    {
+        retarget::reconcile(cwd, id, cancel, goal)?;
+        goal = load(cwd, id)?;
     }
     let context = reconciliation_context(cwd, id, cancel, goal)?;
     let Some(p) = prepare_worktree(&context)? else {
@@ -817,7 +846,14 @@ fn prepare_worktree(context: &Reconciliation<'_>) -> Result<Option<Publication>>
     let p = if let Some(p) = goal.execution.publication.clone() {
         p
     } else {
-        if goal.status != GoalStatus::Active {
+        if !(goal.status == GoalStatus::Active
+            || goal.status == GoalStatus::Verifying
+                && goal
+                    .execution
+                    .retarget
+                    .as_ref()
+                    .is_some_and(|run| run.applied))
+        {
             return Err(error("missing publication intent"));
         }
         let root = crate::paths::data_dir()?
@@ -976,7 +1012,7 @@ fn run_approved_checks(
                     repo,
                     worktree: &p.worktree,
                     goal_ref: reference,
-                    approved_base: &goal.proposal.target_sha,
+                    approved_base: goal.effective_base(),
                     verified_tip: tip,
                     check_id: &check.id,
                     argv: &check.argv,
@@ -1018,15 +1054,14 @@ fn run_approved_checks(
         p.phase = Phase::Verified;
         save(cwd, id, p.clone(), GoalStatus::Verifying, None)?;
     }
-    validate_checks_complete(context, &p)?;
+    validate_checks_complete(goal, &p)?;
     Ok(Some(p))
 }
 
-fn validate_checks_complete(context: &Reconciliation<'_>, p: &Publication) -> Result<()> {
-    let Reconciliation { goal, tip, .. } = context;
+fn validate_checks_complete(goal: &Goal, p: &Publication) -> Result<()> {
     if p.checks.len() != goal.proposal.checks.len()
         || p.checks.iter().zip(&goal.proposal.checks).any(|(e, c)| {
-            !e.passed() || e.check_id != c.id || e.argv != c.argv || e.verified_tip != *tip
+            !e.passed() || e.check_id != c.id || e.argv != c.argv || e.verified_tip != p.tip
         })
     {
         return Err(error(
@@ -1098,13 +1133,7 @@ fn reconcile_push(context: &Reconciliation<'_>, mut p: Publication) -> Result<Op
         save(cwd, id, p.clone(), GoalStatus::Verifying, None)?;
     }
     if p.phase == Phase::Verified {
-        match manager_forge::lookup(
-            repo,
-            ctx,
-            &p.branch,
-            Some(&goal.proposal.target_branch),
-            cancel,
-        ) {
+        match lookup_publication(context, &p, true) {
             Ok(None) => {}
             Ok(Some(_)) => {
                 block(cwd, id, p, "A PR already exists for the Goal branch before push. Human resolution required".into())?;
@@ -1146,18 +1175,11 @@ fn finish_publication(context: &Reconciliation<'_>, mut p: Publication) -> Resul
         cancel,
         goal,
         repo,
-        ctx,
         ..
     } = context;
     let (cwd, id, cancel) = (*cwd, *id, *cancel);
     validate(repo, goal, &p)?;
-    let existing = match manager_forge::lookup(
-        repo,
-        ctx,
-        &p.branch,
-        Some(&goal.proposal.target_branch),
-        cancel,
-    ) {
+    let existing = match lookup_publication(context, &p, p.phase == Phase::Pushed) {
         Ok(pr) => pr,
         Err(_) if cancel.is_cancelled() => return Ok(()),
         Err(e) => {
@@ -1170,6 +1192,15 @@ fn finish_publication(context: &Reconciliation<'_>, mut p: Publication) -> Resul
         }
     };
     if let Some(pr) = existing {
+        if goal.execution.retarget.is_some() && p.phase == Phase::Pushed {
+            return block(
+                cwd,
+                id,
+                p,
+                "A PR already exists for the Goal branch before create. Human resolution required"
+                    .into(),
+            );
+        }
         return record_request(context, p, pr);
     }
     if p.phase == Phase::CreateIntent {
@@ -1187,6 +1218,36 @@ fn finish_publication(context: &Reconciliation<'_>, mut p: Publication) -> Resul
     p.phase = Phase::CreateIntent;
     save(cwd, id, p.clone(), GoalStatus::Verifying, None)?;
     create_and_observe(context, p)
+}
+
+fn lookup_publication(
+    context: &Reconciliation<'_>,
+    p: &Publication,
+    before_write: bool,
+) -> std::result::Result<Option<PullRequest>, String> {
+    let Reconciliation {
+        goal,
+        repo,
+        ctx,
+        cancel,
+        ..
+    } = context;
+    if let Some(run) = &goal.execution.retarget {
+        let head = before_write.then_some(if p.phase == Phase::Verified {
+            run.intent.expected_tip.as_str()
+        } else {
+            p.tip.as_str()
+        });
+        retarget::lookup(context, p, head).map_err(|e| e.to_string())
+    } else {
+        manager_forge::lookup(
+            repo,
+            ctx,
+            &p.branch,
+            Some(&goal.proposal.target_branch),
+            cancel,
+        )
+    }
 }
 
 fn create_and_observe(context: &Reconciliation<'_>, p: Publication) -> Result<()> {
@@ -1215,13 +1276,7 @@ fn create_and_observe(context: &Reconciliation<'_>, p: Publication) -> Result<()
     if cancel.is_cancelled() {
         return Ok(());
     }
-    let observed = manager_forge::lookup(
-        repo,
-        ctx,
-        &p.branch,
-        Some(&goal.proposal.target_branch),
-        cancel,
-    );
+    let observed = lookup_publication(context, &p, false);
     match (observed, create_result) {
         (Ok(Some(pr)), _) => record_request(context, p, pr),
         _ if cancel.is_cancelled() => Ok(()),
