@@ -22,6 +22,8 @@ GitHub title rejection is outside the Quint and Alloy abstractions. The `manager
 
 The publication fixture uses the recorded `gh failed: pull request create failed: GraphQL: ...` form and the older unwrapped form. A near-match with an appended timeout remains blocked; the wrapped rejection with a moved remote base reaches and fails the unchanged base check.
 
+Approved base retargeting is covered at the production CLI, daemon, and Git boundaries in `manager_verification_retry`; it is not modeled in Quint or Alloy. The review pins the same branch's fast-forward SHA, original integrated tip, contract, verified publication and authenticated GitHub identity. Approval saves a two-parent integration intent and rechecks it before applying or adopting it. At the new tip every check reruns in order before either remote write. The regression also checks stale previews, conflicts, non-fast-forward ancestry, unusable PR observations, remote drift, and restart after uncertain push and create intents without repeating either write.
+
 ## Local execution, 2026-11-20
 
 `bash scripts/check_manager_specs.sh` passed on macOS arm64. Its exact commands and output are in `target/formal-reports/manager.q9JVSV/commands.log` and the adjacent logs. The invocation ran the following substantive checks (the runner expands `Q` to the pinned binary and uses an isolated temporary backend endpoint):

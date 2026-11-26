@@ -182,6 +182,7 @@ pub(crate) fn dispatch_action(
                 &goal_id,
                 &expected_tip,
                 request,
+                &state.manager_stop,
             )?)?,
             Action::Approve {
                 proposal_id,
@@ -202,6 +203,7 @@ pub(crate) fn dispatch_action(
                     &goal_id,
                     &preview_id,
                     revision,
+                    &state.manager_stop,
                 )?;
                 coordinator::wake();
                 serde_json::to_value(goal)?

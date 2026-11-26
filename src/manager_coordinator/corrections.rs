@@ -36,16 +36,16 @@ pub(crate) enum CorrectionRequest {
         criteria: Vec<String>,
         paths: Vec<String>,
     },
+    Retarget {},
 }
 
 fn other(message: &str) -> CruiseError {
     CruiseError::Other(message.into())
 }
 
-fn find<'a>(snapshot: &'a manager::Snapshot, goal_id: &str) -> Result<&'a Goal> {
-    snapshot
-        .goals
-        .iter()
+fn find(goals: Vec<Goal>, goal_id: &str) -> Result<Goal> {
+    goals
+        .into_iter()
         .find(|goal| goal.id == goal_id)
         .ok_or_else(|| other("unknown Manager goal for this repository"))
 }
@@ -62,20 +62,32 @@ pub(crate) fn preview(
     goal_id: &str,
     expected_tip: &str,
     request: CorrectionRequest,
+    shutdown: &crate::cancellation::CancellationToken,
 ) -> Result<CorrectivePreview> {
-    let _guard = CONTROL
+    let guard = CONTROL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let snapshot = manager::snapshot(cwd)?;
-    let goal = find(&snapshot, goal_id)?;
+    let goal = find(snapshot.goals, goal_id)?;
     let correction = match request {
         CorrectionRequest::Task(task) => {
             return manager::preview_corrective(cwd, goal_id, expected_tip, task);
         }
+        CorrectionRequest::Retarget {} => {
+            let lease = super::claim_publication(snapshot.repository, goal_id, shutdown)?;
+            drop(guard);
+            return crate::manager_publication::retarget::preview(
+                cwd,
+                goal_id,
+                goal,
+                expected_tip,
+                &lease.token,
+            );
+        }
         CorrectionRequest::Amendment(edits) => {
-            validate_execution_contract(goal)?;
-            crate::manager_publication::validate_amendable(goal)?;
-            manager::amendment(goal, edits)?
+            validate_execution_contract(&goal)?;
+            crate::manager_publication::validate_amendable(&goal)?;
+            manager::amendment(&goal, edits)?
         }
         CorrectionRequest::Resume {
             task_id,
@@ -89,7 +101,7 @@ pub(crate) fn preview(
                 )));
             }
             let (attempt, child) =
-                resumable_attempt(application, goal, &snapshot.repository, &task_id, false)?;
+                resumable_attempt(application, &goal, &snapshot.repository, &task_id, false)?;
             Correction::Resume(reviewed_attempt(attempt, &child, instructions)?)
         }
         CorrectionRequest::Evidence {
@@ -98,7 +110,7 @@ pub(crate) fn preview(
             paths,
         } => Correction::Evidence(evidence_request(
             application,
-            goal,
+            &goal,
             &task_id,
             criteria,
             &paths,
@@ -122,23 +134,36 @@ pub(crate) fn approve(
     goal_id: &str,
     preview_id: &str,
     revision: u64,
+    shutdown: &crate::cancellation::CancellationToken,
 ) -> Result<Goal> {
-    let _guard = CONTROL
+    let guard = CONTROL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let snapshot = manager::snapshot(cwd)?;
-    let goal = find(&snapshot, goal_id)?;
+    let goal = find(snapshot.goals, goal_id)?;
     if goal
         .execution
         .corrective_approvals
         .iter()
         .any(|approved| approved.id == preview_id && approved.revision == revision)
     {
-        return Ok(goal.clone());
+        return Ok(goal);
     }
     let preview = goal.reviewed_preview(preview_id, revision)?;
     match &preview.correction {
         Correction::Task(_) => manager::approve_corrective(cwd, goal_id, preview_id, revision),
+        Correction::Retarget(_) => {
+            let lease = super::claim_publication(snapshot.repository, goal_id, shutdown)?;
+            drop(guard);
+            crate::manager_publication::retarget::approve(
+                cwd,
+                goal_id,
+                goal,
+                preview_id,
+                revision,
+                &lease.token,
+            )
+        }
         Correction::Resume(correction) => admit_resume(
             application,
             cwd,
@@ -155,7 +180,7 @@ pub(crate) fn approve(
             let paths: Vec<String> = reviewed.blobs.iter().map(|b| b.path.clone()).collect();
             let current = evidence_request(
                 application,
-                goal,
+                &goal,
                 &reviewed.task_id,
                 reviewed.criteria.clone(),
                 &paths,
@@ -298,7 +323,7 @@ pub(super) fn launch_mismatch(
 ) -> Option<String> {
     let check = || -> Result<()> {
         let snapshot = manager::snapshot(cwd)?;
-        let goal = find(&snapshot, goal_id)?;
+        let goal = find(snapshot.goals, goal_id)?;
         let Some(attempt) = goal
             .execution
             .attempts
@@ -314,7 +339,7 @@ pub(super) fn launch_mismatch(
             .approved(revision)
             .ok_or_else(|| other("the armed correction was never approved"))?;
         let child = application.read_session(&attempt.session_id)?;
-        verify_reviewed_attempt(goal, attempt, &child, approved)
+        verify_reviewed_attempt(&goal, attempt, &child, approved)
     };
     check().err().map(|error| error.to_string())
 }

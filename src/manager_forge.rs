@@ -338,12 +338,24 @@ pub(crate) fn lookup_title_retry(
     source: &str,
     cancel: &crate::cancellation::CancellationToken,
 ) -> Result<Option<PullRequest>, String> {
+    authenticated_github_user(dir, ctx, cancel)?;
+    lookup(dir, ctx, source, None, cancel)
+}
+
+pub(crate) fn authenticated_github_user(
+    dir: &Path,
+    ctx: &ForgeContext,
+    cancel: &crate::cancellation::CancellationToken,
+) -> Result<u64, String> {
+    if ctx.kind != ForgeKind::GitHub {
+        return Err("expected an authenticated GitHub repository".into());
+    }
     // A public PR list alone does not prove authentication on this host.
     let user = api(dir, ctx, "user", false, cancel)?;
-    if user["id"].as_u64().unwrap_or_default() == 0 {
-        return Err("cannot establish authenticated GitHub identity".into());
-    }
-    lookup(dir, ctx, source, None, cancel)
+    user["id"]
+        .as_u64()
+        .filter(|id| *id != 0)
+        .ok_or_else(|| "cannot establish authenticated GitHub identity".into())
 }
 
 /// Observe a saved PR identity. Any drift is an error, not completion.
@@ -395,6 +407,32 @@ pub(crate) fn remote_head(
         cancel,
     )
     .map(|out| out.trim().to_owned())
+}
+
+/// Fetch objects for an observed ref without updating any local ref or `FETCH_HEAD`.
+pub(crate) fn fetch_review_objects(
+    dir: &Path,
+    reference: &str,
+    cancel: &crate::cancellation::CancellationToken,
+) -> Result<(), String> {
+    run(
+        dir,
+        "git",
+        &[
+            "fetch".into(),
+            "--no-write-fetch-head".into(),
+            "--no-tags".into(),
+            "--no-prune".into(),
+            "--no-prune-tags".into(),
+            "--no-auto-maintenance".into(),
+            "--no-recurse-submodules".into(),
+            "--refmap=".into(),
+            "origin".into(),
+            reference.into(),
+        ],
+        cancel,
+    )?;
+    Ok(())
 }
 
 pub(crate) fn push(

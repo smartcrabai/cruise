@@ -96,6 +96,108 @@ fn ancestor(repo: &Path, base: &str, tip: &str) -> Result<bool, String> {
     }
 }
 
+fn merge_tree(repo: &Path, tip: &str, result: &str) -> Result<Result<String, String>, String> {
+    let out = git(repo, &["merge-tree", "--write-tree", tip, result])?;
+    if out.status.code() == Some(1) {
+        return Ok(Err(String::from_utf8_lossy(&out.stdout).trim().to_owned()));
+    }
+    successful(out, "prepare merge tree").map(Ok)
+}
+
+fn clean_merge_tree(repo: &Path, tip: &str, result: &str) -> Result<String, String> {
+    merge_tree(repo, tip, result)?.map_err(|conflict| format!("integration conflict: {conflict}"))
+}
+
+fn integration_commit(
+    repo: &Path,
+    tree: &str,
+    tip: &str,
+    result: &str,
+    message: &str,
+) -> Result<String, String> {
+    successful(
+        git(
+            repo,
+            &["commit-tree", tree, "-p", tip, "-p", result, "-m", message],
+        )?,
+        "prepare integration commit",
+    )
+}
+
+pub(crate) fn review_base_advance(
+    repo: &Path,
+    old: &str,
+    new: &str,
+    tip: &str,
+) -> Result<Result<String, String>, String> {
+    let (old, new, tip) = (object(repo, old)?, object(repo, new)?, object(repo, tip)?);
+    if old == new || !ancestor(repo, &old, &new)? {
+        return Err("remote target is not a fast-forward of the approved base".into());
+    }
+    if !ancestor(repo, &old, &tip)? || tip == new {
+        return Err(
+            "Goal tip is not distinct from the new base or does not contain the approved base"
+                .into(),
+        );
+    }
+    let merged = merge_tree(repo, &tip, &new)?;
+    if let Ok(tree) = &merged
+        && *tree
+            == successful(
+                git(repo, &["rev-parse", &format!("{new}^{{tree}}")])?,
+                "resolve new base tree",
+            )?
+    {
+        return Err("Goal has no net change from the proposed base".into());
+    }
+    Ok(merged)
+}
+
+pub(crate) fn require_unchecked_ref(repo: &Path, reference: &str) -> Result<(), String> {
+    let output = successful(
+        git(repo, &["worktree", "list", "--porcelain", "-z"])?,
+        "inspect checked-out refs",
+    )?;
+    if output
+        .split('\0')
+        .any(|field| field.strip_prefix("branch ") == Some(reference))
+    {
+        return Err("Goal ref is checked out in a worktree".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn prepare_base_advance(
+    repo: &Path,
+    goal_ref: &str,
+    tip: &str,
+    old: &str,
+    new: &str,
+    reviewed_tree: &str,
+) -> Result<IntegrationIntent, String> {
+    validate_ref(repo, goal_ref)?;
+    require_unchecked_ref(repo, goal_ref)?;
+    if read_ref(repo, goal_ref)?.as_deref() != Some(tip) {
+        return Err("Goal ref drifted before base advance".into());
+    }
+    if review_base_advance(repo, old, new, tip)?.as_deref() != Ok(reviewed_tree) {
+        return Err("Goal base advance conflicts or differs from the reviewed merge tree".into());
+    }
+    Ok(IntegrationIntent {
+        goal_ref: goal_ref.into(),
+        expected_tip: tip.into(),
+        child_base: old.into(),
+        child_result: new.into(),
+        prepared_tip: integration_commit(
+            repo,
+            reviewed_tree,
+            tip,
+            new,
+            "Advance approved Goal base",
+        )?,
+    })
+}
+
 /// Initialize once, or recover an already initialized ref at exactly the approved base.
 ///
 /// # Errors
@@ -160,18 +262,7 @@ pub fn prepare_integration(
     let prepared_tip = if base_tree == result_tree {
         expected_tip.clone()
     } else {
-        let out = git(
-            repo,
-            &["merge-tree", "--write-tree", &expected_tip, &child_result],
-        )?;
-        if !out.status.success() {
-            return Err(format!(
-                "integration conflict or merge-tree failure: {} {}",
-                String::from_utf8_lossy(&out.stdout).trim(),
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
-        }
-        let tree = successful(out, "prepare merge tree")?;
+        let tree = clean_merge_tree(repo, &expected_tip, &child_result)?;
         // If the child is already incorporated, avoid a redundant empty merge.
         let tip_tree = successful(
             git(repo, &["rev-parse", &format!("{expected_tip}^{{tree}}")])?,
@@ -180,21 +271,12 @@ pub fn prepare_integration(
         if tree == tip_tree {
             expected_tip.clone()
         } else {
-            successful(
-                git(
-                    repo,
-                    &[
-                        "commit-tree",
-                        &tree,
-                        "-p",
-                        &expected_tip,
-                        "-p",
-                        &child_result,
-                        "-m",
-                        "Integrate Goal task",
-                    ],
-                )?,
-                "prepare integration commit",
+            integration_commit(
+                repo,
+                &tree,
+                &expected_tip,
+                &child_result,
+                "Integrate Goal task",
             )?
         }
     };
@@ -232,10 +314,7 @@ fn validate_intent(repo: &Path, intent: &IntegrationIntent) -> Result<(String, S
         if parents != format!("{expected} {result}") {
             return Err("prepared commit has unexpected parents".into());
         }
-        let merge_tree = successful(
-            git(repo, &["merge-tree", "--write-tree", &expected, &result])?,
-            "validate prepared merge tree",
-        )?;
+        let merge_tree = clean_merge_tree(repo, &expected, &result)?;
         let prepared_tree = successful(
             git(repo, &["rev-parse", &format!("{prepared}^{{tree}}")])?,
             "resolve prepared tree",
@@ -254,10 +333,7 @@ fn validate_intent(repo: &Path, intent: &IntegrationIntent) -> Result<(String, S
             "resolve result tree",
         )?;
         if base_tree != result_tree {
-            let merge_tree = successful(
-                git(repo, &["merge-tree", "--write-tree", &expected, &result])?,
-                "validate no-change integration",
-            )?;
+            let merge_tree = clean_merge_tree(repo, &expected, &result)?;
             let expected_tree = successful(
                 git(repo, &["rev-parse", &format!("{expected}^{{tree}}")])?,
                 "resolve tip tree",
@@ -408,6 +484,7 @@ fn validate_state(
         git(
             worktree,
             &[
+                "--no-optional-locks",
                 "status",
                 "--porcelain=v1",
                 "--untracked-files=no",
