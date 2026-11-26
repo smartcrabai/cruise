@@ -342,9 +342,9 @@ fi
             "cancelled":false,"state_error":null,"stdout_log":manager.join("stdout"),"stderr_log":manager.join("stderr")}]);
         fs::write(manager.join("stdout"), "")?;
         fs::write(manager.join("stderr"), "")?;
-        let plain = "境".repeat(256);
+        let plain = "\u{5883}".repeat(256);
         let ascii = "a".repeat(300);
-        let unicode = "🦀境".repeat(150);
+        let unicode = "\u{1f980}\u{5883}".repeat(150);
         let mut goals = Vec::new();
         for (index, id) in [
             "plain",
