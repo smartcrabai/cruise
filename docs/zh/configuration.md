@@ -82,6 +82,17 @@ npm install --prefix "${XDG_DATA_HOME:-$HOME/.local/share}/cruise/quint-tools" -
 
 Windows 未设置 `XDG_DATA_HOME` 时使用 `%LOCALAPPDATA%/cruise/data/quint-tools`。`flags.formal_methods.quint_review: true` 保留在导出的 YAML 和新快照中。审批不可跳过，开始后切换标志须重置。图像来自通过的测试，不代表穷举。计划的 **Verify** 和 `builtin:add-formal-specs` 不变。
 
+**让仓库模型保持同步。** `.cruise/formal-coverage.toml` 列出仓库中的 Quint 模型、各模型描述的代码（`covers` glob）以及最后确认一致的提交（`sync`）：
+
+```toml
+[[model]]
+path = "tests/formal/premise_gate.qnt"
+covers = ["src/premise.rs", "builtin/tdd.yaml"]
+sync = "<完整提交 SHA>"
+```
+
+当 `formal_methods` 运行修改了被覆盖的代码时，Cruise 会在最终验证之前检查这些模型。先按原样运行模型，然后由 agent 对每个被覆盖的变更分类（`no effect`、`shape changed`、`promise changed`、`promise maybe broken`），且只能编辑该模型和 coverage 文件；任何其他编辑都会停止运行。只有附带证据的有意承诺变更才可以修改性质。未修改且通过的模型为 `in sync`。更新后的模型必须通过、在 agent 给出的一行 scratch break 下失败，并在同一个 CLI/WebUI 审查中批准新的 PNG。失败会对照代码重放：若每一步都可能发生，则在创建 PR 之前停止并给出反例（代码缺陷）；否则作为模型偏差修复，最多两次。只有 `in sync` 或已批准的模型会把 `sync` 移到已检查的 `HEAD`，并列入 PR/MR 证据。模型必须自包含（无 import）。
+
 <a id="config-file-reference"></a>
 ## 配置文件参考
 

@@ -1,0 +1,13 @@
+# Repository Quint models and the code each one describes. A `formal_methods` run
+# that changes covered code brings the model back in line before publication and
+# moves `sync` to the commit it checked. Models must be self-contained (no imports).
+
+[[model]]
+path = "tests/formal/quint_formal_first.qnt"
+covers = ["src/quint_workflow.rs", "src/quint_workflow/evidence.rs", "src/quint_workflow/tools.rs", "src/application/quint.rs"]
+sync = "088925e28366d1b03cd3db70fc3029ae8f22b756"
+
+[[model]]
+path = "tests/formal/formal_drift.qnt"
+covers = ["src/quint_workflow/maintain.rs"]
+sync = "088925e28366d1b03cd3db70fc3029ae8f22b756"

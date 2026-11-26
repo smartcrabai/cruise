@@ -89,6 +89,15 @@ pub(crate) fn temporary_index_copy(cwd: &Path) -> Result<TemporaryIndex> {
     Ok(temporary)
 }
 
+/// Tree of the whole working tree (tracked, untracked, and staged) without touching the index.
+pub(crate) fn worktree_tree(cwd: &Path) -> Result<String> {
+    ensure_no_repository_filters(cwd)?;
+    let index = temporary_index_copy(cwd)?;
+    git_output_with_index(cwd, &["add", "--all"], Some(&index.path))?;
+    let output = git_output_with_index(cwd, &["write-tree"], Some(&index.path))?;
+    parse_oid("git write-tree", &output.stdout)
+}
+
 pub(crate) fn parse_git_path(cwd: &Path, stdout: &[u8]) -> Result<PathBuf> {
     let value = stdout.strip_suffix(b"\n").unwrap_or(stdout);
     let value = value.strip_suffix(b"\r").unwrap_or(value);

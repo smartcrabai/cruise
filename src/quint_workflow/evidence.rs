@@ -165,6 +165,12 @@ pub(crate) fn publication_evidence(
         "## Implementation evidence\n\n- Approved Quint model SHA-256: `{}`\n- Host: `quint typecheck model.qnt` exit 0; `quint test model.qnt --backend typescript --seed 57` exit 0, {} passing\n",
         preview.model_sha256, receipt.tests,
     );
+    if let Some(maintained) = super::maintain::report(root) {
+        body.push_str("- Repository Quint models brought in line with this change:\n");
+        for line in maintained.lines() {
+            let _ = writeln!(body, "  {line}");
+        }
+    }
     append_observations(&mut body, &report, session, workspace);
     Ok(Some(body))
 }

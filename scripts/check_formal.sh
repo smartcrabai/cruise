@@ -111,6 +111,9 @@ run_check quality-gate-alloy java -jar target/formal-tools/alloy-6.2.0.jar exec 
 run_check quality-gate-alloy-expectations alloy_expectations tests/formal/quality_gate.als "$RUN/quality-gate-alloy/receipt.json"
 run_check sync-merge-ff-typecheck "$QUINT" typecheck tests/formal/sync_merge_ff.qnt
 run_check sync-merge-ff-test "$QUINT" test tests/formal/sync_merge_ff.qnt --main sync_merge_ff --backend typescript --seed 61
+run_check formal-drift-typecheck "$QUINT" typecheck tests/formal/formal_drift.qnt
+run_check formal-drift-test "$QUINT" test tests/formal/formal_drift.qnt --main formal_drift --backend typescript --seed 63
+run_check formal-drift-simulation "$QUINT" run tests/formal/formal_drift.qnt --main formal_drift --init init --step step --invariant safety --backend typescript --seed 63 --max-samples 1000 --max-steps 20
 run_check checkpoint-bdd cargo +1.99.1 test --locked --test graph_state --test checkpoint_bdd
 run_check ui-locale bash scripts/check_ui_locale_specs.sh
 run_check quality-gate-contracts cargo +1.99.1 test --locked --test quality_gate_graph --test quality_gate_cli --test quality_gate_config --test quality_gate_schema

@@ -86,6 +86,17 @@ npm install --prefix "${XDG_DATA_HOME:-$HOME/.local/share}/cruise/quint-tools" -
 
 On Windows with no `XDG_DATA_HOME`, use `%LOCALAPPDATA%/cruise/data/quint-tools`. `flags.formal_methods.quint_review: true` survives workflow ejection and new snapshots. The host gate cannot be skipped; changing the flag after execution starts requires a reset. The PNG shows transitions from passing tests, not exhaustive exploration. The plan's **Verify** action and `builtin:add-formal-specs` are separate and unchanged.
 
+**Repository models kept in step.** `.cruise/formal-coverage.toml` lists repository Quint models, the code each describes (`covers` globs), and the commit where each was last confirmed (`sync`):
+
+```toml
+[[model]]
+path = "tests/formal/premise_gate.qnt"
+covers = ["src/premise.rs", "builtin/tdd.yaml"]
+sync = "<full commit SHA>"
+```
+
+When a `formal_methods` run changes covered code, Cruise checks each such model before the final verification. It runs the model as it is, then an agent classifies every covered change (`no effect`, `shape changed`, `promise changed`, `promise maybe broken`) and may edit only that model and the coverage file; any other edit stops the run. A property may change only for an intended promise change with cited evidence. An unchanged, passing model is `in sync`. An updated model must pass, must fail on the agent's one-line scratch break, and needs approval of its new PNG in the same CLI/WebUI review. A failure is replayed against the code: if every step can happen, the run stops before the PR with the counterexample (a code bug); otherwise it is repaired as drift, at most twice. Only `in sync` or approved models move `sync` to the checked `HEAD`, and the PR/MR evidence lists them. Models must be self-contained (no imports).
+
 <a id="config-file-reference"></a>
 ## Config File Reference
 
