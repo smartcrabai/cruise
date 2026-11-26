@@ -46,7 +46,8 @@ struct Measurement {
 pub(super) async fn finish(agent: &Agent<'_>, files: &Files, preview: &Preview) -> Result<Receipt> {
     let model = files.approved(preview)?;
     let source = files.read_model(&format!("{}.qnt", preview.model_sha256))?;
-    let mut prompt = include_str!("../../prompts/quint-final.md").to_owned();
+    let mut prompt = crate::variable::VariableStore::default()
+        .resolve(include_str!("../../prompts/quint-final.md"))?;
     let _ = write!(
         prompt,
         "\nApproved model file: {}\nRead-only earlier reports, when present:",

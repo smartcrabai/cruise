@@ -5,7 +5,7 @@ Persist the exact model bytes in a new or task-owned `.qnt` file in the reposito
 Return only one JSON object (no fences):
 
 ```
-{"model":"relative/path/to/model.qnt","ci":"relative/path/to/ci-config","blockers":[],"checks":[{"command":"exact command","exit":0,"excerpt":"one short attributable stdout/stderr line, or empty","earlier":false}],"measurements":[{"label":"public measurement and unit","before":12,"after":18}],"recordings":["https://forge.example/owner/repo/.../public-recording"]}
+{{"model":"relative/path/to/model.qnt","ci":"relative/path/to/ci-config","blockers":[],"checks":[{{"command":"exact command","exit":0,"excerpt":"one short attributable stdout/stderr line, or empty","earlier":false}}],"measurements":[{{"label":"public measurement and unit","before":12,"after":18}}],"recordings":["https://forge.example/owner/repo/.../public-recording"]}}
 ```
 
 All lists may be empty when unavailable, except blockers must name real mismatches or missing required setup. `before` may be null for a saved value with no comparable baseline. Set `earlier` true for an earlier step's report, including expected TDD red results, not a command executed here. The host independently runs and records Quint commands.
