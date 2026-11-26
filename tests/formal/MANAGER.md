@@ -30,6 +30,8 @@ The production regression also accepts a finalized but unintegrated result super
 
 `manager_image_binding.qnt` models durable private input, no replay across restart, and task-scoped delivery at the approved revision. Manager CI checks the model and runs an isolated CLI, daemon, fake SDK, and child-workflow regression with real image bytes.
 
+`manager_quint_file.qnt` models a Manager proposal that names a task and a previously approved Quint model. It imports the source approval state machine and checks exact revision, repository, Goal, task, and unchanged bytes before dispatch. The production Quint browser scenario approves a real diagram, verifies the Manager's pinned source, and observes the approved child reading the identical file while an unassigned child receives nothing.
+
 ## Local execution, 2026-11-20
 
 `bash scripts/check_manager_specs.sh` passed on macOS arm64. Its exact commands and output are in `target/formal-reports/manager.q9JVSV/commands.log` and the adjacent logs. The invocation ran the following substantive checks (the runner expands `Q` to the pinned binary and uses an isolated temporary backend endpoint):

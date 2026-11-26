@@ -4299,11 +4299,19 @@ impl CruiseApplication {
     ) -> Result<SessionState> {
         let id = claim.session_id().to_owned();
         let state = self.manager.load(&id)?;
-        if state.managed_child.is_some() {
-            crate::manager_coordinator::validate_claimed_child(self, &claim, &state)?;
-        }
+        let quint = if state.managed_child.is_some() {
+            crate::manager_coordinator::validate_claimed_child(self, &claim, &state)?
+        } else {
+            None
+        };
         let result = self
-            .run_claimed(&id, &claim, request, Arc::clone(&sink), log_sink, false)
+            .run_claimed(
+                &id,
+                &claim,
+                request,
+                Arc::clone(&sink),
+                (log_sink, false, quint),
+            )
             .await;
         drop(claim);
         sink.operation_finished(&id)?;
@@ -4781,8 +4789,11 @@ impl CruiseApplication {
         claim: &OperationClaim,
         request: RunRequest,
         sink: Arc<dyn ApplicationEventSink>,
-        log_sink: Option<Arc<dyn LogSink>>,
-        batch_started: bool,
+        (log_sink, batch_started, quint): (
+            Option<Arc<dyn LogSink>>,
+            bool,
+            Option<crate::manager::quint::Binding>,
+        ),
     ) -> Result<SessionState> {
         let _sleep_guard = crate::sleep_guard::prevent_sleep_for_run();
         let initial_session = self.manager.load(id).ok();
@@ -4811,7 +4822,7 @@ impl CruiseApplication {
             claim,
             request,
             sink,
-            (log_sink, batch_started),
+            (log_sink, batch_started, quint.as_ref()),
             &mut unresolved_failed_steps,
             (&execution, initial_session.as_ref()),
         );
@@ -4846,7 +4857,11 @@ impl CruiseApplication {
         claim: &OperationClaim,
         request: RunRequest,
         sink: Arc<dyn ApplicationEventSink>,
-        (log_sink, batch_started): (Option<Arc<dyn LogSink>>, bool),
+        (log_sink, batch_started, quint): (
+            Option<Arc<dyn LogSink>>,
+            bool,
+            Option<&crate::manager::quint::Binding>,
+        ),
         unresolved_failed_steps: &mut bool,
         (execution, initial_session): (&crate::telemetry::Operation, Option<&SessionState>),
     ) -> Result<SessionState> {
@@ -4887,7 +4902,7 @@ impl CruiseApplication {
             return result;
         }
 
-        let inputs_result = prepare_run_inputs(&self.manager, &mut setup, claim);
+        let inputs_result = prepare_run_inputs(&self.manager, &mut setup, claim, quint);
         if inputs_result.is_err() {
             prepare.finish_result(&inputs_result);
             let Err(error) = inputs_result else {
@@ -5466,11 +5481,18 @@ fn prepare_run_inputs(
     manager: &SessionManager,
     setup: &mut RunSetup,
     claim: &OperationClaim,
+    quint: Option<&crate::manager::quint::Binding>,
 ) -> Result<RunInputs> {
     let plan_path = setup.state.plan_path(&manager.sessions_dir());
     let mut vars = setup.state.run_variables(&manager.sessions_dir())?;
     vars.set_named_file(crate::session::PLAN_VAR, plan_path);
     vars.set_artifacts_root(setup.state.artifacts_path(&manager.sessions_dir()));
+    if let Some(binding) = quint {
+        vars.set_named_file(
+            crate::manager::quint::VARIABLE,
+            binding.verified_child_file(manager, &setup.state)?,
+        );
+    }
     let tracker = crate::file_tracker::FileTracker::with_root(setup.workspace.path().to_path_buf());
     let is_exec = setup.state.exec;
     let mut persist = || {
@@ -6309,8 +6331,7 @@ where
                             ..RunRequest::default()
                         },
                         Arc::clone(&worker_sink),
-                        worker_log_sink.clone(),
-                        true,
+                        (worker_log_sink.clone(), true, None),
                     ))
                     .catch_unwind()
                     .await

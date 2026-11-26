@@ -14,6 +14,8 @@ use crate::error::{CruiseError, Result};
 
 pub(crate) mod images;
 
+pub(crate) mod quint;
+
 static WRITER: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,6 +209,8 @@ pub struct FrozenContract {
     pub workflow: crate::config::WorkflowConfig,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub task_images: std::collections::BTreeMap<String, Vec<images::Image>>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub(crate) task_quint: std::collections::BTreeMap<String, quint::Binding>,
 }
 impl Proposal {
     /// Validate the proposal's identifiers, criteria, task graph, and contract.
@@ -278,6 +282,14 @@ impl Proposal {
             {
                 return Err(invalid("empty or duplicate task"));
             }
+        }
+        if self.contract.as_ref().is_some_and(|contract| {
+            contract
+                .task_quint
+                .keys()
+                .any(|task| !tasks.contains_key(task))
+        }) {
+            return Err(invalid("Quint assignment names an unknown task"));
         }
         let mut visiting = HashSet::new();
         let mut done = HashSet::new();
@@ -490,6 +502,7 @@ fn freeze_contract(cwd: &Path, repo: &Path) -> Result<FrozenContract> {
         forge_repository: forge.repository,
         workflow,
         task_images: images::TaskImages::new(),
+        task_quint: std::collections::BTreeMap::new(),
     })
 }
 
@@ -1369,6 +1382,44 @@ pub(crate) fn save_proposal_for_turn(
     Ok(proposal)
 }
 
+pub(crate) fn bind_quint(
+    cwd: &Path,
+    proposal_id: &str,
+    revision: u64,
+    task: String,
+    session: &str,
+) -> Result<Proposal> {
+    let _guard = WRITER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut snapshot = load(repository(cwd)?)?;
+    let proposal = snapshot
+        .proposal
+        .as_mut()
+        .filter(|proposal| proposal.id == proposal_id && proposal.revision == revision)
+        .ok_or_else(|| CruiseError::Busy("stale or unknown manager proposal".into()))?;
+    if !proposal.tasks.iter().any(|entry| entry.id == task) {
+        return Err(CruiseError::Other(
+            "Quint assignment names an unknown task".into(),
+        ));
+    }
+    verify_contract(cwd, &snapshot.repository, proposal)?;
+    let store = crate::session::SessionManager::new(crate::paths::data_dir()?);
+    let binding = quint::Binding::capture(&store, &snapshot.repository, session)?;
+    proposal
+        .contract
+        .as_mut()
+        .ok_or_else(|| CruiseError::Other("proposal has no frozen execution contract".into()))?
+        .task_quint
+        .insert(task, binding);
+    proposal.revision = revision
+        .checked_add(1)
+        .ok_or_else(|| CruiseError::Other("proposal revision exhausted".into()))?;
+    let preview = proposal.clone();
+    save(&snapshot)?;
+    Ok(preview)
+}
+
 /// Approve the reviewed proposal and durably register its initial Goal.
 /// Re-approval of the same proposal returns the existing Goal.
 ///
@@ -1402,6 +1453,12 @@ pub fn approve(cwd: &Path, proposal_id: &str, revision: u64) -> Result<Goal> {
         .ok_or_else(|| CruiseError::Other("proposal has no frozen execution contract".into()))?;
     for image in contract.task_images.values().flatten() {
         image.read(&snapshot.repository)?;
+    }
+    if !contract.task_quint.is_empty() {
+        let store = crate::session::SessionManager::new(crate::paths::data_dir()?);
+        for binding in contract.task_quint.values() {
+            binding.read(&store, &snapshot.repository)?;
+        }
     }
     let execution = GoalExecution {
         anchor: Some(contract.anchor.clone()),

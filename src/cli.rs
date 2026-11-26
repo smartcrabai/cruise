@@ -190,6 +190,16 @@ pub enum ManagerCommand {
         #[arg(long)]
         no_wait: bool,
     },
+    /// Attach a source session's approved Quint model to one task in the pending preview.
+    BindQuint {
+        /// Exact destination task ID from the proposal.
+        task: String,
+        /// Source Cruise session ID, not a file path.
+        source_session: String,
+        /// Exact pending proposal revision before the attachment.
+        #[arg(long)]
+        revision: u64,
+    },
     /// Review and approve a goal proposal.
     Approve(ManagerApprovalArgs),
     /// Pause a goal.

@@ -32,12 +32,17 @@ pub(super) fn routes() -> Router<WebState> {
         .route("/manager/{repo}", get(detail))
         .route("/webui/manager/open", post(open))
         .route("/webui/manager/{repo}/sync", get(sync))
-        .route("/webui/manager/{repo}/images/{id}", get(image));
+        .route("/webui/manager/{repo}/images/{id}", get(image))
+        .route(
+            "/webui/manager/{repo}/quint-preview/{revision}/{index}",
+            get(quint_preview),
+        );
     [
         "message",
         "retry-image-turn",
         "propose",
         "approve",
+        "bind-quint",
         "preview-corrective",
         "approve-corrective",
         "pause",
@@ -207,6 +212,20 @@ fn region_html(state: &WebState, key: &str, cwd: &Path) -> Result<String> {
     // Keep the exact revision when it crosses the TSX number boundary.
     if let Some(revision) = snapshot["proposal"]["revision"].as_u64() {
         snapshot["proposal"]["revision"] = json!(revision.to_string());
+        let bindings: Vec<_> = snapshot["proposal"]["contract"]["task_quint"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .map(|(index, (task, binding))| {
+                json!({
+                    "task": task,
+                    "binding": binding,
+                    "url": format!("/webui/manager/{key}/quint-preview/{revision}/{index}"),
+                })
+            })
+            .collect();
+        snapshot["quint_bindings"] = json!(bindings);
     }
     let mut review = snapshot["proposal"]["objective"]
         .as_str()
@@ -437,6 +456,42 @@ async fn image(
     .await
 }
 
+async fn quint_preview(
+    UiState(state): UiState,
+    UrlPath((key, revision, index)): UrlPath<(String, u64, usize)>,
+) -> Response {
+    blocking(move || {
+        let Some(repository) = repository(&key)? else {
+            return Ok(StatusCode::NOT_FOUND.into_response());
+        };
+        let cwd = manager::checkout_for(&repository)?;
+        let snapshot = manager::snapshot(&cwd)?;
+        let Some(binding) = snapshot
+            .proposal
+            .as_ref()
+            .filter(|proposal| proposal.revision == revision)
+            .and_then(|proposal| proposal.contract.as_ref())
+            .and_then(|contract| contract.task_quint.values().nth(index))
+        else {
+            return Ok(StatusCode::NOT_FOUND.into_response());
+        };
+        let Ok((_, png)) = binding.read(state.application.managed_session_store(), &repository)
+        else {
+            return Ok(StatusCode::NOT_FOUND.into_response());
+        };
+        Ok((
+            [
+                (axum::http::header::CONTENT_TYPE, "image/png"),
+                (axum::http::header::CACHE_CONTROL, "private, no-store"),
+                (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            ],
+            png,
+        )
+            .into_response())
+    })
+    .await
+}
+
 fn inline_error(status: StatusCode, id: &str, message: &str) -> Response {
     (
         status,
@@ -598,6 +653,12 @@ fn parse_action(name: &str, fields: &Fields) -> std::result::Result<Action, Stri
             turn_id: field("turn_id")?,
         },
         "propose" => Action::Propose,
+        "bind-quint" => Action::BindQuint {
+            proposal_id: field("proposal_id")?,
+            revision: revision()?,
+            task_id: task_id()?,
+            source_session: field("source_session")?,
+        },
         "approve" => Action::Approve {
             proposal_id: field("proposal_id")?,
             revision: revision()?,

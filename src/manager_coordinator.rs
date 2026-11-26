@@ -899,6 +899,19 @@ fn child_plan(goal: &Goal, attempt: &TaskAttempt, sessions: &Path) -> Result<Str
         plan = crate::attachments::format_input_with_attachments(&plan, &paths);
         plan.push('\n');
     }
+    if goal
+        .proposal
+        .contract
+        .as_ref()
+        .is_some_and(|contract| contract.task_quint.contains_key(&attempt.task_id))
+    {
+        let path = manager::quint::child_path(sessions, &attempt.session_id);
+        let _ = writeln!(
+            plan,
+            "\n# Approved Quint input\n\nRead `{}` as the reviewed contract.",
+            path.display()
+        );
+    }
     for revision in &attempt.corrections {
         let (approved, instructions) = match goal.approved(*revision) {
             Some(approved) => match &approved.correction {
@@ -962,9 +975,9 @@ pub(crate) fn validate_claimed_child(
     application: &CruiseApplication,
     claim: &OperationClaim,
     child: &crate::session::SessionState,
-) -> Result<()> {
+) -> Result<Option<manager::quint::Binding>> {
     let Some(child_owner) = child.managed_child.as_ref() else {
-        return Ok(());
+        return Ok(None);
     };
     let _guard = CONTROL
         .lock()
@@ -1038,7 +1051,8 @@ pub(crate) fn validate_claimed_child(
         &crate::attachments::attachments_dir(&sessions.join(&child.id)),
         manager::images::child_images(goal, &attempt.task_id),
     )?;
-    sync_child_plan(application, child, &expected_plan)
+    sync_child_plan(application, child, &expected_plan)?;
+    Ok(contract.task_quint.get(&attempt.task_id).cloned())
 }
 
 fn check_orphan_children(application: &CruiseApplication, ids: &HashSet<&String>) -> Result<()> {
@@ -1215,6 +1229,13 @@ fn claim_reserved_child(
     let runtime = application.runtime();
     let store = application.managed_session_store();
     let result = (|| {
+        let binding = contract.task_quint.get(&attempt.task_id);
+        let model = if let Some(binding) = binding {
+            let repository = manager::repository(cwd)?;
+            Some(binding.read(store, &repository)?.0)
+        } else {
+            None
+        };
         let created =
             store.create_managed_child(child, &contract.workflow, plan, |session_dir| {
                 let images = manager::images::child_images(goal, &attempt.task_id);
@@ -1243,6 +1264,9 @@ fn claim_reserved_child(
             return Err(CruiseError::Other(
                 "reserved Manager child already has a runner".into(),
             ));
+        }
+        if let Some((binding, model)) = binding.zip(model) {
+            binding.write_child(store, &created, &model)?;
         }
         let claim = runtime.try_begin_managed(&created.id, &child_owner, OperationKind::Run)?;
         manager::update_goal(cwd, goal_id, |current| {

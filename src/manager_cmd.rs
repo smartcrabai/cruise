@@ -63,6 +63,11 @@ pub(crate) async fn run(args: ManagerArgs) -> Result<()> {
         ManagerCommand::Propose { no_wait } => {
             return conversation(&client, cwd, json!({"type":"propose"}), no_wait, true).await;
         }
+        ManagerCommand::BindQuint {
+            task,
+            source_session,
+            revision,
+        } => return bind_quint(&client, cwd, &task, &source_session, revision).await,
         ManagerCommand::Approve(approval) => {
             let snapshot = client.manager_snapshot(cwd).await?;
             approve_proposal(&snapshot, &approval, tty)?
@@ -117,6 +122,37 @@ pub(crate) async fn run(args: ManagerArgs) -> Result<()> {
     };
     let result = send(&client, cwd, action).await?;
     print_accepted(&result);
+    Ok(())
+}
+
+async fn bind_quint(
+    client: &DaemonClient,
+    cwd: &str,
+    task: &str,
+    source_session: &str,
+    revision: u64,
+) -> Result<()> {
+    let snapshot = client.manager_snapshot(cwd).await?;
+    let id = snapshot["proposal"]["id"]
+        .as_str()
+        .ok_or_else(|| error("no_proposal"))?;
+    let preview = send(
+        client,
+        cwd,
+        json!({
+            "type":"bind_quint", "proposal_id":id, "revision":revision,
+            "task_id":task, "source_session":source_session
+        }),
+    )
+    .await?;
+    println!(
+        "Pending proposal revision {} (not approved)",
+        preview["revision"]
+    );
+    println!(
+        "{task}: {}",
+        serde_json::to_string_pretty(&preview["contract"]["task_quint"][task])?
+    );
     Ok(())
 }
 

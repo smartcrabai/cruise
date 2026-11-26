@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { loginWebUi, waitForWebUiLogin } from './auth.mjs';
+import { prepareManagerHandoff } from './manager-quint.mjs';
 
 if (process.argv[2] === '--agent') {
   let prompt = '';
@@ -42,12 +43,12 @@ module model {
   process.exit(0);
 }
 
-const root = await mkdtemp(join(tmpdir(), 'cruise-quint-browser-'));
+const root = await realpath(await mkdtemp(join(tmpdir(), 'cruise-quint-browser-')));
 const reports = resolve(process.env.WEBUI_QUINT_REPORT_DIR ?? 'target/formal-reports/quint-browser');
 const env = { PATH: process.env.PATH, HOME: root, XDG_CONFIG_HOME: join(root, 'config'),
   XDG_DATA_HOME: join(root, 'data'), XDG_STATE_HOME: join(root, 'state'),
   CRUISE_DISABLE_NOTIFICATIONS: '1', CRUISE_DISABLE_HERDR: '1', CRUISE_UI_LANGUAGE: 'en', NO_COLOR: '1',
-  GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
+  GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_ALLOW_PROTOCOL: 'file' };
 const data = join(env.XDG_DATA_HOME, 'cruise');
 const self = fileURLToPath(import.meta.url);
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -90,6 +91,8 @@ const watchdog = setTimeout(() => { console.error('Quint browser watchdog expire
 try {
   await mkdir(data, { recursive: true });
   await mkdir(reports, { recursive: true });
+  await mkdir(join(env.XDG_CONFIG_HOME, 'cruise'), { recursive: true });
+  await writeFile(join(env.XDG_CONFIG_HOME, 'cruise', 'default.yaml'), 'check_base_ci: false\n');
   await symlink(resolve('tests/formal'), join(data, 'quint-tools'), 'dir');
   const bin = process.env.WEBUI_BDD_BIN ?? resolve('target/debug/cruise-runtime');
   server = spawn(bin, ['daemon', 'serve', '--port', '0', '--webui-dir', resolve('webui')],
@@ -106,6 +109,7 @@ try {
   await loginWebUi(page, loginUrl);
   for (const name of ['approve', 'reject', 'revise', 'off']) {
     const { repo, dir, id } = await fixture(name, name !== 'off');
+    let handoff, foreign;
     await page.goto(`${base}/sessions/${id}`);
     await page.waitForFunction(() => !!window.app);
     await page.getByRole('button', { name: 'Run on current branch', exact: true }).click();
@@ -133,6 +137,8 @@ try {
       assert.deepEqual(await ready(), first, 'reattach shows the same pending preview');
       if (name === 'approve') {
         const other = await fixture('cli', false);
+        foreign = other.id;
+        handoff = await prepareManagerHandoff({ repo, dir, id, data, env, bin, run, reports });
         await page.locator(`#session-row-${other.id}`).click();
         await page.waitForURL(`**/sessions/${other.id}`);
         await panel.waitFor({ state: 'detached' });
@@ -193,6 +199,7 @@ try {
         const approved = state.quint_run.stage.preview.model_sha256;
         assert.equal(sha(await readFile(join(repo, 'model.qnt'))), approved);
         console.log(`${name}: verified; approved model ${approved.slice(0, 12)}; counter=7`);
+        if (handoff) await handoff({ page, base, context, source: state, foreign });
       }
     }
   }
