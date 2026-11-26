@@ -219,6 +219,11 @@ fn manager_fixtures() -> Vec<(&'static str, Value)> {
             json!({"key": key, "snapshot": {
                 "transcript": [{"id": "turn", "role": "user", "text": "Hello", "status": "completed", "images": [], "can_retry_image": false}],
                 "running": false, "proposal": proposal, "approval_objective": "Deliver the feature", "goals": [goal], "prompts": [{"goal_id": "goal", "prompt": prompt}],
+                "quint_bindings": [{
+                    "task": "implement",
+                    "binding": {"source_session": "source", "source_execution": "execution", "model_sha256": "model-digest", "png_sha256": "png-digest"},
+                    "url": format!("/webui/manager/{key}/quint-preview/2/0"),
+                }],
             }}),
         ),
         ("components/manager-goal", json!({"key": key, "goal": goal})),
@@ -235,7 +240,7 @@ fn manager_fixtures() -> Vec<(&'static str, Value)> {
         ),
         (
             "components/manager-review",
-            json!({"corrective": true, "dialogId": "review", "url": format!("/webui/manager/{key}/approve-corrective"), "goalId": "goal", "previewId": "preview", "revision": "2", "objective": "Improve checks", "instructions": "Correct the failed check", "target": "abc123"}),
+            json!({"corrective": true, "reviewId": "review", "url": format!("/webui/manager/{key}/approve-corrective"), "goalId": "goal", "previewId": "preview", "revision": "2", "objective": "Improve checks", "instructions": "Correct the failed check", "target": "abc123"}),
         ),
     ]
 }
