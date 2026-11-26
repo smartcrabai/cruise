@@ -67,6 +67,8 @@ Quint 0.33.1 passes 38 witnesses and 1,000 seeded executions
 of up to 13 transitions; Apalache 0.62.1 found no violation through 11
 transitions. The finite model does not prove the Rust implementation or provider APIs.
 
+`sync_merge_ff.qnt` imports this host model and checks the after-PR merge policy independently of `merge.ff`, with no direct publication and unchanged conflict and drift guards. `scripts/check_formal.sh` typechecks and runs its witnesses in CI.
+
 ```sh
 mkdir -p target/formal-reports/after-pr-host-git
 node scripts/formal/verify_quint.cjs tests/formal/node_modules/.bin/quint \

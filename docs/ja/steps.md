@@ -173,6 +173,8 @@ after-pr:
 
 組み込みの PR 後 prompt には commit、push、forge 操作を禁止します。ホストが検証した競合解消を commit し、対象 PR/MR の branch にだけ push します。CI 修復は現在の HEAD の証拠に基づき、ホスト verifier が実行可能な場合は正確な stage 済み修復を公開前に検証します。実行できない場合は Cruise が warning を表示し、ホスト検証なしで公開して push 先 HEAD の CI に依拠します。その後 CI を再確認し、session 内で同じ HEAD の対象ジョブを一度だけ再試行するか、マージせず停止します。停止した session を再実行すると、前回の判定を使い回さず現在の HEAD の CI を再確認します。native merge は準備状態を独立に確認します。GitHub で、check が queued や実行中のまま（runner 待ちのジョブなど）`wait-ci` が55分の期限に達した場合も、native merge は待ち続けます。現在の HEAD の CI が pending のポーリングごとに10分の readiness 予算を数え直し、merge step の開始から最大60分まで延ばします。CI の失敗、conflict、レビューの要求ではこれまでどおりすぐに待ちを終え、それ以外の pending（mergeability が不明、CI 未登録）は10分の上限のままです。
 
+組み込みの `sync-base` は `git merge --ff --no-edit` を使います。`merge.ff` の設定にかかわらず、可能なら fast-forward し、分岐していればローカルで merge します。競合時は従来どおり解消を待ちます。
+
 競合解消を commit する前に、ホストは記録した競合 path 以外の tracked file の編集と、ignore されていない untracked path の追加・削除を拒否します。ignore された path は比較しません。ホストは競合 path だけを stage するため ignore された file が commit に入ることはなく、resolver の検証は `node_modules/.vitest-cache` や `tsconfig.tsbuildinfo` などの ignore された cache を作成・更新・削除して構いません。
 
 `push-after-sync` が失敗した後に競合中の merge を中止した場合（`git merge --abort`）、session を再実行すると、記録した `MERGE_HEAD` を必要とする commit を再試行せず、after-PR を `sync-base` からやり直します。対象は、worktree が記録した PR branch の merge 前の HEAD にあり、進行中の merge、unmerged path、tracked file の変更、ignore されていない untracked path がない場合だけです。それ以外は今までどおり失敗します。新しい sync で競合を記録し直し、resolver を再び実行します。

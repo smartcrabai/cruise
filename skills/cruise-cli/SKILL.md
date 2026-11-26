@@ -302,6 +302,8 @@ unmerged with a message naming the setting.
 
 At merge time, GitHub's compare API checks whether the PR includes the current base. Only confirmed behind/diverged ancestry or `CONFLICTING`/`DIRTY` mergeability routes the built-in `squash-merge` through `follow-up/sync-base` → `sync-base` → `resolve-conflict` → `push-after-sync` → `wait-ci` → `fix-ci-error`. Only native `ResyncRequired` routing from `squash-merge` to its `if.fail` target starts a fresh after-PR pass: it resets `budgeted_traversals` for every after-PR edge except `squash-merge` → target and clears group retry counts, preserving edge traversal history. The resync edge remains capped at `max_retries`; generic `if.fail` retains shared budgets. Worst case: up to `max_retries` resyncs, each pass allowing up to `max_retries - 1` CI-fix iterations; zero retry budget permits no resync. Other readiness failures still fail. This ancestry check and recovery are GitHub-only; GitLab behavior is unchanged.
 
+Built-in `sync-base` uses `git merge --ff --no-edit` independently of `merge.ff`. A divergent base can merge locally; a real conflict still goes through the existing guarded resolution.
+
 ### `--image`
 
 `cruise plan --image screenshot.png "task"` attaches a PNG, JPG/JPEG, WebP, or GIF; repeat the flag for multiple files. Interactive plan input also detects dragged/pasted image paths. Cruise copies attachments into the session so paths remain stable and appends those stored paths to the planning input. Image attachments disable `force_exec` for that invocation so planning can consume them.
