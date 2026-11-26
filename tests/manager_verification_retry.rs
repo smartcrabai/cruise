@@ -679,7 +679,21 @@ fi
             let mut failed_attempt = goal["execution"]["attempts"][0].clone();
             failed_attempt["session_id"] = json!("earlier-attempt");
             failed_attempt["integrated"] = json!(false);
-            failed_attempt["result_sha"] = Value::Null;
+            let tree = git(&git_repo.repo, &["rev-parse", "HEAD^{tree}"])?;
+            let failed_tip = git(
+                &git_repo.repo,
+                &[
+                    "commit-tree",
+                    &tree,
+                    "-p",
+                    &git_repo.base,
+                    "-m",
+                    "Superseded attempt",
+                ],
+            )?;
+            failed_attempt["result_sha"] = json!(failed_tip);
+            failed_attempt["finalization_intent"] =
+                json!({"expected_head":git_repo.base, "expected_tree":tree});
             goal["execution"]["attempts"][0]["attempt"] = json!(2);
             goal["execution"]["attempts"] =
                 json!([failed_attempt, goal["execution"]["attempts"][0]]);
@@ -900,6 +914,56 @@ fi
             256
         );
         assert!(fs::read_to_string(home.join("body-legacy"))?.contains(&f.objective));
+        Ok(())
+    }
+
+    #[test]
+    fn retarget_refuses_unresolved_task_work_even_with_integrated_history() -> Result<()> {
+        let root = TempDir::new()?;
+        let home = root.path();
+        let f = RetargetFixture::new(home)?;
+        let seed: Value = serde_json::from_slice(&fs::read(&f.record)?)?;
+        let (_stop, _, _) = start_daemon(home)?;
+        for condition in [
+            "latest-unintegrated",
+            "resume-pending",
+            "resume-starting",
+            "correction-pending",
+            "other-preview",
+            "unobserved-finalization",
+        ] {
+            let mut record = seed.clone();
+            let goal = &mut record["goals"][0];
+            let attempts = &mut goal["execution"]["attempts"];
+            match condition {
+                "latest-unintegrated" => {
+                    attempts[0]["integrated"] = json!(true);
+                    attempts[1]["integrated"] = json!(false);
+                }
+                "resume-pending" => attempts[1]["resume_pending"] = json!(true),
+                "resume-starting" => attempts[1]["resume_starting"] = json!(true),
+                "correction-pending" => attempts[1]["correction_pending"] = json!(1),
+                "unobserved-finalization" => attempts[0]["result_sha"] = Value::Null,
+                "other-preview" => {
+                    goal["execution"]["corrective_preview"] = json!({
+                        "id":"pending","revision":2,"goal_id":"legacy","integrated_tip":f.git.tip,
+                        "task":{"id":"new-task","instructions":"Not approved"}
+                    });
+                }
+                _ => unreachable!(),
+            }
+            fs::write(&f.record, serde_json::to_vec(&record)?)?;
+            let saved = f.goal()?;
+            let rejected = f.preview(home, "legacy")?;
+            let stderr = String::from_utf8_lossy(&rejected.stderr);
+            assert!(!rejected.status.success(), "{condition} accepted");
+            assert!(
+                stderr.contains("Retarget requires all tasks integrated and no unresolved work"),
+                "{condition}: {stderr}"
+            );
+            assert_eq!(f.goal()?, saved);
+        }
+        f.refs_unchanged()?;
         Ok(())
     }
 

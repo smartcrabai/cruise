@@ -657,6 +657,14 @@ impl Goal {
                 .any(|attempt| attempt.task_id == task_id && attempt.integrated)
     }
 
+    pub(crate) fn latest_attempt(&self, task_id: &str) -> Option<&TaskAttempt> {
+        self.execution
+            .attempts
+            .iter()
+            .filter(|attempt| attempt.task_id == task_id)
+            .max_by_key(|attempt| attempt.attempt)
+    }
+
     pub(crate) fn approved(&self, revision: u64) -> Option<&CorrectivePreview> {
         self.execution
             .corrective_approvals
