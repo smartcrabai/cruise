@@ -827,21 +827,7 @@ pub(crate) fn ready_tasks(goal: &Goal, capacity: usize) -> Result<Vec<String>> {
         ));
     }
     let tasks = &goal.proposal.tasks;
-    let mut sessions = HashSet::new();
-    let mut attempts = HashSet::new();
-    if goal.execution.attempts.iter().any(|attempt| {
-        !tasks.iter().any(|task| task.id == attempt.task_id)
-            || attempt.attempt == 0
-            || attempt.session_id.is_empty()
-            || attempt.base_sha.is_empty()
-            || (attempt.integrated && attempt.result_sha.as_deref().is_none_or(str::is_empty))
-            || !sessions.insert(&attempt.session_id)
-            || !attempts.insert((&attempt.task_id, attempt.attempt))
-    }) {
-        return Err(CruiseError::Other(
-            "invalid Manager task attempt record".into(),
-        ));
-    }
+    validate_task_attempts(goal)?;
     let mut ready = Vec::new();
     for task in tasks {
         // Any previous attempt requires an explicit retry decision, even if it failed.
@@ -860,6 +846,29 @@ pub(crate) fn ready_tasks(goal: &Goal, capacity: usize) -> Result<Vec<String>> {
         }
     }
     Ok(ready)
+}
+
+pub(crate) fn validate_task_attempts(goal: &Goal) -> Result<()> {
+    let mut sessions = HashSet::new();
+    let mut attempts = HashSet::new();
+    if goal.execution.attempts.iter().any(|attempt| {
+        !goal
+            .proposal
+            .tasks
+            .iter()
+            .any(|task| task.id == attempt.task_id)
+            || attempt.attempt == 0
+            || attempt.session_id.is_empty()
+            || attempt.base_sha.is_empty()
+            || (attempt.integrated && attempt.result_sha.as_deref().is_none_or(str::is_empty))
+            || !sessions.insert(&attempt.session_id)
+            || !attempts.insert((&attempt.task_id, attempt.attempt))
+    }) {
+        return Err(CruiseError::Other(
+            "invalid Manager task attempt record".into(),
+        ));
+    }
+    Ok(())
 }
 
 const CORRECTION_HEADING: &str = "\n# Approved correction ";
@@ -2207,11 +2216,7 @@ fn resumable_attempt<'a>(
     }
     corrections::no_evidence_running(goal, task_id)?;
     let attempt = goal
-        .execution
-        .attempts
-        .iter()
-        .filter(|attempt| attempt.task_id == task_id)
-        .max_by_key(|attempt| attempt.attempt)
+        .latest_attempt(task_id)
         .ok_or_else(|| CruiseError::Other("task has no previous attempt".into()))?;
     validate_resume_attempt(attempt, recovery)?;
     let child = validate_resume_child(application, goal, attempt)?;
@@ -2422,29 +2427,27 @@ fn select_retry_attempt<'a>(goal: &'a Goal, task_id: &str) -> Result<&'a TaskAtt
             "a Manager reservation is already pending".into(),
         ));
     }
-    let attempts: Vec<_> = goal
+    let attempts = goal
         .execution
         .attempts
         .iter()
-        .filter(|a| a.task_id == task_id)
-        .collect();
+        .filter(|a| a.task_id == task_id);
     if goal.task_resolved(task_id) {
         return Err(CruiseError::Other(
             "task is already resolved by evidence".into(),
         ));
     }
     corrections::no_evidence_running(goal, task_id)?;
-    if attempts.iter().any(|a| a.integrated) {
+    if attempts.clone().any(|a| a.integrated) {
         return Err(CruiseError::Other("task is already integrated".into()));
     }
-    if attempts.iter().any(|a| a.integration_intent.is_some()) {
+    if attempts.clone().any(|a| a.integration_intent.is_some()) {
         return Err(CruiseError::Other(
             "an earlier attempt has an integration intent requiring reconciliation".into(),
         ));
     }
-    let previous = attempts
-        .iter()
-        .max_by_key(|a| a.attempt)
+    let previous = goal
+        .latest_attempt(task_id)
         .ok_or_else(|| CruiseError::Other("task has no previous attempt".into()))?;
     if previous.resume_pending
         || (previous.resume_starting && goal.status != manager::GoalStatus::Blocked)
@@ -2462,7 +2465,7 @@ fn select_retry_attempt<'a>(goal: &'a Goal, task_id: &str) -> Result<&'a TaskAtt
                 .into(),
         ));
     }
-    Ok(*previous)
+    Ok(previous)
 }
 
 /// A Goal blocked only because this task's unpublished reservation outlived its base pin

@@ -60,6 +60,7 @@
 
 ### Fixed
 
+- Allow Manager retarget after an integrated retry supersedes an older finalized result. Retarget still rejects unintegrated latest attempts and unresolved work.
 - Recognize the complete `gh pr create` error wrapper when recovering a confirmed legacy GitHub title rejection, without changing the retry safety checks.
 - Bound Cruise Manager GitHub PR titles to 256 Unicode characters, preserving the full Objective in the description when shortened. `cruise manager retry GOAL` can reconcile a legacy, confirmed title rejection without rerunning checks or repeating an uncertain create.
 - Stop leaving a Manager Goal blocked with `interrupted Manager reservation no longer matches Goal tip` when another child is integrated between `cruise manager retry GOAL TASK` and the dispatch of the reserved attempt. A reserved attempt with no published session is now pinned again to the current Goal tip at dispatch and starts once from it. For a Goal an earlier version blocked this way, run `cruise manager retry GOAL TASK` again: it reactivates the Goal without reserving another attempt, where it previously failed with `a Manager reservation is already pending`. A reservation whose session was already published stays blocked.
