@@ -11,6 +11,7 @@ runtime:
   - prev.output
   - prev.stderr
   - prev.success
+  - quint.approved
 generate:
   - description
   - schema

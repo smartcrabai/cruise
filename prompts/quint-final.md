@@ -9,3 +9,5 @@ Return only one JSON object (no fences):
 ```
 
 All lists may be empty when unavailable, except blockers must name real mismatches or missing required setup. `before` may be null for a saved value with no comparable baseline. Set `earlier` true for an earlier step's report, including expected TDD red results, not a command executed here. The host independently runs and records Quint commands.
+
+Approved model file: {quint.approved}

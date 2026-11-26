@@ -46,13 +46,10 @@ struct Measurement {
 pub(super) async fn finish(agent: &Agent<'_>, files: &Files, preview: &Preview) -> Result<Receipt> {
     let model = files.approved(preview)?;
     let source = files.read_model(&format!("{}.qnt", preview.model_sha256))?;
-    let mut prompt = crate::variable::VariableStore::default()
-        .resolve(include_str!("../../prompts/quint-final.md"))?;
-    let _ = write!(
-        prompt,
-        "\nApproved model file: {}\nRead-only earlier reports, when present:",
-        model.display()
-    );
+    let mut vars = crate::variable::VariableStore::default();
+    vars.set_named_file(super::APPROVED_VAR, model.clone());
+    let mut prompt = vars.resolve(include_str!("../../prompts/quint-final.md"))?;
+    prompt.push_str("\nRead-only earlier reports, when present:");
     let names: Vec<_> = [
         "test-first.md",
         "implementation.md",

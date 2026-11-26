@@ -56,6 +56,8 @@ canaries:
   - {rubric_id: tdd-write-tests-quality, expected: false, output: 'Only change the documentation theme.'}
   - {rubric_id: tdd-implement-quality, expected: true, output: 'diff --git a/src/lib.rs b/src/lib.rs\n+    a.checked_add(b)'}
   - {rubric_id: tdd-implement-quality, expected: false, output: 'Remove all tests without implementing anything.'}
+  - {rubric_id: tdd-apply-advice-quality, expected: true, output: 'no-change'}
+  - {rubric_id: tdd-apply-advice-quality, expected: false, output: "diff --git a/src/lib.rs b/src/lib.rs\n-    a.checked_add(b)\n+    Some(a + b)"}
   - rubric_id: tdd-quint-draft-quality
     expected: true
     output: |-
@@ -81,6 +83,8 @@ canaries:
       }
       ```
   - {rubric_id: tdd-quint-draft-quality, expected: false, output: 'I edited the sources and ran all tests successfully; here is an untested prose specification.'}
+  - {rubric_id: tdd-quint-final-quality, expected: true, output: '{"model":"specs/addition.qnt","ci":".github/workflows/ci.yml","blockers":["Quint is unavailable; no Quint checks ran"],"checks":[],"measurements":[],"recordings":[]}'}
+  - {rubric_id: tdd-quint-final-quality, expected: false, output: 'I changed the approved model so it passes, and assume CI ran.'}
   - {rubric_id: tdd-e2e-quality, expected: true, output: 'No in-scope UI target exists in this pure addition library; keep checked-addition coverage in the default test suite.'}
   - {rubric_id: tdd-e2e-quality, expected: false, output: 'The colors are nice.'}
   - {rubric_id: tdd-e2e-quality, expected: true, output: 'For the actual Tauri target, run `cruise docs e2e` and then `cruise docs e2e tauri`; follow that policy and keep CLI/API checks in the default test suite.'}
