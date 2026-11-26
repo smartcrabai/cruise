@@ -4,7 +4,10 @@ use serde_json::{Value, json};
 use std::{
     fs,
     io::{BufReader, Write},
-    os::unix::{fs::PermissionsExt, net::UnixListener},
+    os::unix::{
+        fs::PermissionsExt,
+        net::{UnixListener, UnixStream},
+    },
     path::Path,
     process::{Child, Command, Output, Stdio},
     time::{Duration, Instant},
@@ -691,6 +694,50 @@ async fn propose_logs_only_response_shape_when_json_parsing_fails() {
     }
 }
 
+fn send_fake_reply(socket: &mut UnixStream, session_id: &str, fixture: &str, proposal: bool) {
+    let alternate = match fixture {
+        "missing-branch" => {
+            VALID_PROPOSAL.replace(r#""target_branch":"main""#, r#""target_branch":"""#)
+        }
+        "two-messages" => VALID_PROPOSAL.replace("Deliver goal", "FixtureEarlierProposal"),
+        _ => String::new(),
+    };
+    let invalid_target = [alternate.as_str()];
+    let two_messages = [alternate.as_str(), "FixtureTrailingReply"];
+    let outputs: &[&str] = if proposal {
+        match fixture {
+            "missing-branch" => &invalid_target,
+            "prose" => &[" \nFixturePreface\n{}\r\n "],
+            "fenced" => &["```json\n{\"note\":\"FixtureFence\"}\n```"],
+            "two-messages" => &two_messages,
+            _ => &[VALID_PROPOSAL],
+        }
+    } else {
+        &["Discussed goal"]
+    };
+    let events = std::iter::once(json!({"ev":"message_accepted","session_id":session_id}))
+        .chain(outputs.iter().flat_map(|output| {
+            [
+                json!({"ev":"text_delta","session_id":session_id,"text":output}),
+                json!({"ev":"text_done","session_id":session_id}),
+            ]
+        }))
+        .chain(std::iter::once(
+            json!({"ev":"turn_done","session_id":session_id}),
+        ));
+    for value in events {
+        write_frame(
+            socket,
+            &ServerFrame {
+                v: API_VERSION_MAJOR,
+                reply_to: None,
+                event: event(value),
+            },
+        )
+        .unwrap_or_else(|error| panic!("write fake Jcode event: {error}"));
+    }
+}
+
 #[test]
 #[ignore = "subprocess-only fake jcode runtime"]
 fn manager_fake_jcode_runtime() {
@@ -735,47 +782,8 @@ fn manager_fake_jcode_runtime() {
             );
             let fixture = fs::read_to_string(release_path)
                 .unwrap_or_else(|error| panic!("read fake response fixture: {error}"));
-            let alternate = match fixture.as_str() {
-                "missing-branch" => {
-                    VALID_PROPOSAL.replace(r#""target_branch":"main""#, r#""target_branch":"""#)
-                }
-                "two-messages" => VALID_PROPOSAL.replace("Deliver goal", "FixtureEarlierProposal"),
-                _ => String::new(),
-            };
-            let invalid_target = [alternate.as_str()];
-            let two_messages = [alternate.as_str(), "FixtureTrailingReply"];
-            let outputs: &[&str] = if serialized.contains("Create a proposal for human review") {
-                match fixture.as_str() {
-                    "missing-branch" => &invalid_target,
-                    "prose" => &[" \nFixturePreface\n{}\r\n "],
-                    "fenced" => &["```json\n{\"note\":\"FixtureFence\"}\n```"],
-                    "two-messages" => &two_messages,
-                    _ => &[VALID_PROPOSAL],
-                }
-            } else {
-                &["Discussed goal"]
-            };
-            let events = std::iter::once(json!({"ev":"message_accepted","session_id":session_id}))
-                .chain(outputs.iter().flat_map(|output| {
-                    [
-                        json!({"ev":"text_delta","session_id":session_id,"text":output}),
-                        json!({"ev":"text_done","session_id":session_id}),
-                    ]
-                }))
-                .chain(std::iter::once(
-                    json!({"ev":"turn_done","session_id":session_id}),
-                ));
-            for value in events {
-                write_frame(
-                    &mut socket,
-                    &ServerFrame {
-                        v: API_VERSION_MAJOR,
-                        reply_to: None,
-                        event: event(value),
-                    },
-                )
-                .unwrap_or_else(|error| panic!("write fake Jcode event: {error}"));
-            }
+            let proposal = serialized.contains("Create a proposal for human review");
+            send_fake_reply(&mut socket, session_id, &fixture, proposal);
             continue;
         }
         let reply = match &frame.request {
