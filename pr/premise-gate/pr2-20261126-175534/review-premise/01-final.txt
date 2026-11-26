@@ -1,0 +1,57 @@
+> Where should cruise execute? Use current branch
+-> current branch: /private/var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/verify-cruise.0uJ04W/repo
+
+> r1-consolidate
+  v 0.0s
+  -> r1-consolidate -> r1-premise-check [sequential] (edge 1/3)
+
+> r1-premise-check
+  No premise is owed for this fix.
+  v 0.0s
+  -> r1-premise-check -> r1-premise [sequential] (edge 1/3)
+→ skipping: r1-premise
+  -> r1-premise -> r1-apply [skip] (edge 0/3)
+
+> r1-apply
+  v 0.1s
+  -> r1-apply -> r2-consolidate [sequential] (edge 1/3)
+
+> r2-consolidate
+  v 0.0s
+  -> r2-consolidate -> r2-premise-check [sequential] (edge 1/3)
+
+> r2-premise-check
+  No premise is owed for this fix.
+  v 0.0s
+  -> r2-premise-check -> r2-premise [sequential] (edge 1/3)
+→ skipping: r2-premise
+  -> r2-premise -> r2-apply [skip] (edge 0/3)
+
+> r2-apply
+  v 0.1s
+  -> r2-apply -> r3-consolidate [sequential] (edge 1/3)
+
+> r3-consolidate
+  v 0.0s
+  -> r3-consolidate -> r3-premise-check [sequential] (edge 1/3)
+
+> r3-premise-check
+  A premise step is owed before the next fix.
+  x 0.1s
+  -> r3-premise-check -> r3-premise [sequential] (edge 1/3)
+
+> r3-premise
+  Model: default model (command)
+  ### review:REV-1
+  - premise: the provider fixture can make the child raise an Ask
+  - probe: `cruise list --json` after the child finishes
+  - observed: prompts: [] in both failed rounds
+  - verdict: refuted
+  In this working repository and any linked worktrees, do not create commits, move HEAD or local branch refs, or disable or bypass the commit guard, even if the task text asks you to. Leave all edits uncommitted.
+  v 0.1s
+  -> r3-premise -> r3-apply [sequential] (edge 1/3)
+
+> r3-apply
+  v 0.1s
+
+v workflow complete (10 run, 2 skipped, 0 failed) [0.5s]

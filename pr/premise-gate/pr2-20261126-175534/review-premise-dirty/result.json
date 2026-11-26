@@ -1,0 +1,15 @@
+{
+  "argv": [
+    "cruise",
+    "run",
+    "20261126175601892_b368b9c00df341bbbd5354772f9b7ffa"
+  ],
+  "cols": 120,
+  "completed": true,
+  "error": null,
+  "exit_code": 1,
+  "rows": 40,
+  "snapshots": [
+    "01-final"
+  ]
+}

@@ -1,0 +1,94 @@
+# Three apply rounds that leave REV-1 `persists`. Every host step is the real
+# internal command the built-in TDD loop runs; the stand-in agent is `cat`.
+command: [cat]
+create_pr: false
+steps:
+  r1-consolidate:
+    command: |-
+      A="$(dirname '{plan}')/artifacts"; mkdir -p "$A/analysis"
+      printf '### W1 | major | src/fixture.rs:1\n- contributing findings: REV-1\n- exact minimal change: register the Ask tool\n' > "$A/analysis/worklist.md"
+      printf '## Applied work items\n- W1 - blocked\n\n## Ledger Records\n```text\niteration: 1\n\n### REV-1 | persists | major | src/fixture.rs:1\n- summary: fixture never raises Ask\n- evidence: round 1 still shows prompts: []\n```\n' > "$A/apply-r1.md"
+  r1-premise-check:
+    command: "{cruise.bin} internal premise-check review"
+    env:
+      CRUISE_PREMISE_PLAN: '{plan}'
+  r1-premise:
+    skip: prev.success
+    prompt: |-
+      ### review:REV-1
+      - premise: the provider fixture can make the child raise an Ask
+      - probe: `cruise list --json` after the child finishes
+      - observed: prompts: [] in both failed rounds
+      - verdict: refuted
+    output_file: premise/review.md
+    env:
+      CRUISE_PREMISE_PLAN: '{plan}'
+    quality_gates:
+      - command: "{cruise.bin} internal premise-record review"
+        stop_exit_codes: [75]
+  r1-apply:
+    command: |-
+      A="$(dirname '{plan}')/artifacts"; cp "$A/apply-r1.md" "$A/analysis/apply-output.md"
+      {cruise.bin} internal tdd-ledger-snapshot
+    env:
+      CRUISE_TDD_LEDGER_PLAN: '{plan}'
+  r2-consolidate:
+    command: |-
+      A="$(dirname '{plan}')/artifacts"; mkdir -p "$A/analysis"
+      printf '### W1 | major | src/fixture.rs:1\n- contributing findings: REV-1\n- exact minimal change: register the Ask tool\n' > "$A/analysis/worklist.md"
+      printf '## Applied work items\n- W1 - blocked\n\n## Ledger Records\n```text\niteration: 2\n\n### REV-1 | persists | major | src/fixture.rs:1\n- summary: fixture never raises Ask\n- evidence: round 2 still shows prompts: []\n```\n' > "$A/apply-r2.md"
+  r2-premise-check:
+    command: "{cruise.bin} internal premise-check review"
+    env:
+      CRUISE_PREMISE_PLAN: '{plan}'
+  r2-premise:
+    skip: prev.success
+    prompt: |-
+      ### review:REV-1
+      - premise: the provider fixture can make the child raise an Ask
+      - probe: `cruise list --json` after the child finishes
+      - observed: prompts: [] in both failed rounds
+      - verdict: refuted
+    output_file: premise/review.md
+    env:
+      CRUISE_PREMISE_PLAN: '{plan}'
+    quality_gates:
+      - command: "{cruise.bin} internal premise-record review"
+        stop_exit_codes: [75]
+  r2-apply:
+    command: |-
+      A="$(dirname '{plan}')/artifacts"; cp "$A/apply-r2.md" "$A/analysis/apply-output.md"
+      {cruise.bin} internal tdd-ledger-snapshot
+    env:
+      CRUISE_TDD_LEDGER_PLAN: '{plan}'
+  r3-consolidate:
+    command: |-
+      A="$(dirname '{plan}')/artifacts"; mkdir -p "$A/analysis"
+      printf '### W1 | major | src/fixture.rs:1\n- contributing findings: REV-1\n- exact minimal change: register the Ask tool\n' > "$A/analysis/worklist.md"
+      printf '## Applied work items\n- W1 - blocked\n\n## Ledger Records\n```text\niteration: 3\n\n### REV-1 | persists | major | src/fixture.rs:1\n- summary: fixture never raises Ask\n- evidence: round 3 still shows prompts: []\n```\n' > "$A/apply-r3.md"
+  r3-premise-check:
+    command: "{cruise.bin} internal premise-check review"
+    env:
+      CRUISE_PREMISE_PLAN: '{plan}'
+  r3-premise:
+    skip: prev.success
+    prompt: |-
+      ### review:REV-1
+      - premise: the provider fixture can make the child raise an Ask
+      - probe: `cruise list --json` after the child finishes
+      - observed: prompts: [] in both failed rounds
+      - verdict: refuted
+    output_file: premise/review.md
+    env:
+      CRUISE_PREMISE_PLAN: '{plan}'
+    quality_gates:
+      # Stand-in for a premise step that edits the workspace.
+      - command: "printf edited > edited-by-premise.txt"
+      - command: "{cruise.bin} internal premise-record review"
+        stop_exit_codes: [75]
+  r3-apply:
+    command: |-
+      A="$(dirname '{plan}')/artifacts"; cp "$A/apply-r3.md" "$A/analysis/apply-output.md"
+      {cruise.bin} internal tdd-ledger-snapshot
+    env:
+      CRUISE_TDD_LEDGER_PLAN: '{plan}'
