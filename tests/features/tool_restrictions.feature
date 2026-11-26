@@ -110,3 +110,13 @@ Feature: Prompt step restrictions enforce the tool restrictions plan
       | nonstring-command | 2    | cannot read bash command  |
       | nonbash           | 0    | none                      |
       | absent-policy     | 0    | none                      |
+
+  Scenario Outline: Early gate exit still checks the hook result when stdin breaks
+    When the real gate exits before stdin is written for malformed case <case>
+    Then the gate exits <code> with diagnostic "<diagnostic>"
+    Examples:
+      | case          | code | diagnostic                |
+      | policy-json   | 2    | invalid shell deny policy |
+      | policy-prefix | 2    | invalid shell deny prefix |
+      | nonbash       | 0    | none                      |
+      | absent-policy | 0    | none                      |
