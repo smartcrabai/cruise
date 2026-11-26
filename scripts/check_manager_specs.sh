@@ -65,6 +65,7 @@ run_check alloy-receipt node scripts/formal/check_alloy_receipt.cjs tests/formal
 run_check receipt-validator-tests node --test scripts/formal/check_alloy_receipt.test.cjs
 run_check manager-bdd cargo +1.99.1 test --locked --all-features --test manager_approval_bdd
 run_check manager-cli cargo +1.99.1 test --locked --all-features --test manager_corrective_approval
+run_check manager-publication cargo +1.99.1 test --locked --all-features --test manager_verification_retry
 run_check manager-webui cargo +1.99.1 test --locked --all-features --lib webui::tests::manager::manager_retry
 run_check manager-webui-render-evidence grep -Fx \
   'test webui::tests::manager::manager_retry_distinguishes_task_from_verification_scope ... ok' \

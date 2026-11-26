@@ -134,11 +134,22 @@ pub(crate) fn begin_publication(
         manager::GoalStatus::Active
             | manager::GoalStatus::Verifying
             | manager::GoalStatus::AwaitingMerge
-    ) || shutdown.is_cancelled()
-    {
+    ) {
         return Err(CruiseError::Other(
             "Manager publication is paused or shutting down".into(),
         ));
+    }
+    claim_publication(snapshot.repository, goal_id, shutdown)
+}
+
+// The caller holds CONTROL so claim, pause and shutdown are serialized.
+fn claim_publication(
+    repository: std::path::PathBuf,
+    goal_id: &str,
+    shutdown: &crate::cancellation::CancellationToken,
+) -> Result<PublicationLease> {
+    if shutdown.is_cancelled() {
+        return Err(CruiseError::Other("Manager is shutting down".into()));
     }
     let mut operations = PUBLICATIONS
         .lock()
@@ -153,7 +164,7 @@ pub(crate) fn begin_publication(
     operations.insert(goal_id.to_owned(), (id, token.clone()));
     Ok(PublicationLease {
         goal_id: goal_id.to_owned(),
-        repository: snapshot.repository,
+        repository,
         id,
         token,
     })
@@ -2687,9 +2698,13 @@ pub(crate) fn pause(application: &CruiseApplication, cwd: &Path, goal_id: &str) 
     Ok(goal)
 }
 
-/// Explicitly requeue verification only after the previous worker has drained.
-pub(crate) fn retry_verification(cwd: &Path, goal_id: &str) -> Result<Goal> {
-    let _guard = CONTROL
+/// Explicit retry after the previous publication worker has drained.
+pub(crate) fn retry_goal(
+    cwd: &Path,
+    goal_id: &str,
+    shutdown: &crate::cancellation::CancellationToken,
+) -> Result<Goal> {
+    let guard = CONTROL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if PUBLICATIONS
@@ -2701,12 +2716,18 @@ pub(crate) fn retry_verification(cwd: &Path, goal_id: &str) -> Result<Goal> {
             "Manager publication is still stopping; retry shortly".into(),
         ));
     }
-    crate::manager_publication::retry_verification(cwd, goal_id)?;
-    manager::snapshot(cwd)?
+    let snapshot = manager::snapshot(cwd)?;
+    let goal = snapshot
         .goals
         .into_iter()
         .find(|goal| goal.id == goal_id)
-        .ok_or_else(|| CruiseError::Other("unknown Manager goal".into()))
+        .ok_or_else(|| CruiseError::Other("unknown Manager goal".into()))?;
+    if crate::manager_publication::can_retry_title_rejection(&goal) {
+        let lease = claim_publication(snapshot.repository, goal_id, shutdown)?;
+        drop(guard);
+        return crate::manager_publication::retry_title_rejection(cwd, goal_id, goal, &lease);
+    }
+    crate::manager_publication::retry_verification(cwd, goal_id)
 }
 
 /// Restore the pre-pause state without retrying failed or interrupted attempts.

@@ -295,11 +295,12 @@ fn endpoint(ctx: &ForgeContext) -> String {
 }
 
 /// Lookup all states, rejecting duplicate or cross-repository matches. Errors never mean absence.
+/// When no target is given, a PR from this source to any base is evidence, not absence.
 pub(crate) fn lookup(
     dir: &Path,
     ctx: &ForgeContext,
     source: &str,
-    target: &str,
+    target: Option<&str>,
     cancel: &crate::cancellation::CancellationToken,
 ) -> Result<Option<PullRequest>, String> {
     let query = format!("{}?state=all&per_page=100", endpoint(ctx));
@@ -313,7 +314,7 @@ pub(crate) fn lookup(
                 field(value, "/target_branch")?,
             ),
         };
-        if s != source || t != target {
+        if s != source || target.is_some_and(|target| t != target) {
             continue;
         }
         let pr = parse(ctx, value)?;
@@ -329,6 +330,20 @@ pub(crate) fn lookup(
         }
     }
     Ok(found)
+}
+
+pub(crate) fn lookup_title_retry(
+    dir: &Path,
+    ctx: &ForgeContext,
+    source: &str,
+    cancel: &crate::cancellation::CancellationToken,
+) -> Result<Option<PullRequest>, String> {
+    // A public PR list alone does not prove authentication on this host.
+    let user = api(dir, ctx, "user", false, cancel)?;
+    if user["id"].as_u64().unwrap_or_default() == 0 {
+        return Err("cannot establish authenticated GitHub identity".into());
+    }
+    lookup(dir, ctx, source, None, cancel)
 }
 
 /// Observe a saved PR identity. Any drift is an error, not completion.
@@ -412,6 +427,17 @@ pub(crate) fn push(
     Ok(())
 }
 
+pub(crate) fn github_title_prefix(title: &str) -> Option<&str> {
+    const LIMIT: usize = 256;
+    if title.len() <= LIMIT {
+        return None;
+    }
+    let mut chars = title.char_indices();
+    let (end, _) = chars.nth(LIMIT - 1)?;
+    chars.next()?;
+    Some(&title[..end])
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct CreateRequest<'a> {
     pub source: &'a str,
@@ -436,23 +462,32 @@ pub(crate) fn create(
     } = request;
     let repo = format!("{}/{}", ctx.host, ctx.repository);
     let (program, args): (&str, Vec<String>) = match ctx.kind {
-        ForgeKind::GitHub => (
-            "gh",
-            vec![
-                "pr".into(),
-                "create".into(),
-                "--repo".into(),
-                repo,
-                "--head".into(),
-                source.into(),
-                "--base".into(),
-                target.into(),
-                "--title".into(),
-                title.into(),
-                "--body".into(),
-                body.into(),
-            ],
-        ),
+        ForgeKind::GitHub => {
+            let (title, body) = match github_title_prefix(title) {
+                Some(prefix) => (
+                    format!("{prefix}…"),
+                    format!("{body}\n\n## Goal objective\n\n{title}"),
+                ),
+                None => (title.into(), body.into()),
+            };
+            (
+                "gh",
+                vec![
+                    "pr".into(),
+                    "create".into(),
+                    "--repo".into(),
+                    repo,
+                    "--head".into(),
+                    source.into(),
+                    "--base".into(),
+                    target.into(),
+                    "--title".into(),
+                    title,
+                    "--body".into(),
+                    body,
+                ],
+            )
+        }
         ForgeKind::GitLab => (
             "glab",
             vec![

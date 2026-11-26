@@ -30,6 +30,7 @@ pub(crate) struct WebState {
     pub(crate) web_sessions: Arc<Mutex<HashSet<String>>>,
     pub(crate) control: Option<Arc<ControlGate>>,
     pub(crate) manager_startup_error: Option<String>,
+    pub(crate) manager_stop: crate::cancellation::CancellationToken,
 }
 
 pub(crate) struct ControlGate {
@@ -68,6 +69,7 @@ impl WebState {
             web_sessions: Arc::new(Mutex::new(HashSet::new())),
             control: None,
             manager_startup_error: None,
+            manager_stop: crate::cancellation::CancellationToken::new(),
         })
     }
 }
@@ -350,7 +352,7 @@ where
         .ip()
         .is_loopback();
     let router = application_router(state.clone(), loopback);
-    let manager_stop = crate::cancellation::CancellationToken::new();
+    let manager_stop = state.manager_stop.clone();
     let shutdown_manager = manager_stop.clone();
     let (manager_sink, manager_log_sink) = state.hub.sinks();
     let manager_task = state.manager_startup_error.is_none().then(|| {

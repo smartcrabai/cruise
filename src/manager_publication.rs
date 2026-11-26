@@ -10,6 +10,9 @@ use crate::manager_forge::{self, PullRequest, PullRequestState};
 use crate::manager_git::CheckEvidence;
 use serde::{Deserialize, Serialize};
 
+const GITHUB_TITLE_REJECTION: &str =
+    "gh failed: GraphQL: Title is too long (maximum is 256 characters) (createPullRequest)";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Publication {
     tip: String,
@@ -333,6 +336,87 @@ pub(crate) fn corrective_tip(goal: &Goal) -> Result<&str> {
     Ok(p.tip.as_str())
 }
 
+pub(crate) fn can_retry_title_rejection(goal: &Goal) -> bool {
+    goal.status == GoalStatus::Blocked
+        && goal.execution.publication.as_ref().is_some_and(|p| {
+            p.phase == Phase::CreateIntent && p.forge_kind == crate::forge::ForgeKind::GitHub
+        })
+        && manager_forge::github_title_prefix(&goal.proposal.objective).is_some()
+        // Match the exact legacy record, not a substring of an arbitrary forge error.
+        && goal
+            .reason
+            .as_deref()
+            .and_then(|reason| reason.strip_prefix("PR create outcome uncertain (Err(\""))
+            .and_then(|reason| reason.strip_suffix("\"), lookup Ok(None)). Human resolution required"))
+            == Some(GITHUB_TITLE_REJECTION)
+}
+
+/// Consume the explicit retry only after reconciling the exact rejected intent.
+/// An unobservable PR or invalid evidence cannot reopen the create.
+pub(crate) fn retry_title_rejection(
+    cwd: &Path,
+    id: &str,
+    goal: Goal,
+    lease: &crate::manager_coordinator::PublicationLease,
+) -> Result<Goal> {
+    if !lease.owns(cwd, id)? || !can_retry_title_rejection(&goal) || !every_task_done(&goal) {
+        return Err(error("Goal has no eligible GitHub PR title rejection"));
+    }
+    crate::manager_coordinator::validate_execution_contract(&goal)?;
+    let cancel = &lease.token;
+    let context = reconciliation_context(cwd, id, cancel, goal)?;
+    let goal = &context.goal;
+    let p = goal
+        .execution
+        .publication
+        .clone()
+        .ok_or_else(|| error("missing rejected publication intent"))?;
+    validate_saved_intent(&context, &p)?;
+    validate_checks_complete(&context, &p)?;
+    let observed =
+        manager_forge::lookup_title_retry(&context.repo, &context.ctx, &p.branch, cancel)
+            .map_err(|e| error(format!("Cannot reconcile rejected GitHub PR: {e}")))?;
+    if let Some(pr) = &observed {
+        if !matches_request(pr, &context.ctx.repository, goal, &p) {
+            return Err(error(
+                "Existing PR identity or head does not match verified Goal",
+            ));
+        }
+    } else {
+        for (branch, sha) in [
+            (p.branch.as_str(), p.tip.as_str()),
+            (&goal.proposal.target_branch, &goal.proposal.target_sha),
+        ] {
+            let actual = manager_forge::remote_head(&context.repo, branch, cancel)
+                .map_err(|e| error(format!("Cannot recheck approved remote ref {branch}: {e}")))?;
+            if actual != format!("{sha}\trefs/heads/{branch}") {
+                return Err(error(format!(
+                    "Remote ref {branch} differs from verified publication"
+                )));
+            }
+        }
+    }
+    validate(&context.repo, goal, &p)?;
+    {
+        let _guard = effect_guard(cwd, id, cancel, &GoalStatus::Blocked)?;
+        manager::update_goal(cwd, id, |latest| {
+            if !can_retry_title_rejection(latest) {
+                return Err(error("Goal changed while reconciling the rejected PR"));
+            }
+            latest.status = GoalStatus::Verifying;
+            latest.reason = None;
+            Ok(())
+        })?;
+    }
+    // CreateIntent remains durable. A crash from here may be reconciled, not replayed.
+    if let Some(pr) = observed {
+        record_request(&context, p, pr)?;
+    } else {
+        create_and_observe(&context, p)?;
+    }
+    load(cwd, id)
+}
+
 pub(crate) fn validate_verification_retry(goal: &Goal) -> Result<()> {
     if goal.status != GoalStatus::Blocked {
         return Err(error("Goal is not blocked"));
@@ -365,7 +449,7 @@ pub(crate) fn validate_verification_retry(goal: &Goal) -> Result<()> {
 /// Start a fresh verification only on an explicit user request. Never use this
 /// to retry an uncertain push or PR create. Prior evidence and logs remain
 /// attached to the Goal and are not overwritten.
-pub(crate) fn retry_verification(cwd: &Path, id: &str) -> Result<()> {
+pub(crate) fn retry_verification(cwd: &Path, id: &str) -> Result<Goal> {
     manager::update_goal(cwd, id, |goal| {
         validate_verification_retry(goal)?;
         let publication = goal
@@ -379,7 +463,7 @@ pub(crate) fn retry_verification(cwd: &Path, id: &str) -> Result<()> {
         }
         goal.status = GoalStatus::Active;
         goal.reason = None;
-        Ok(())
+        Ok(goal.clone())
     })
 }
 
@@ -659,6 +743,19 @@ fn prepare_reconciliation<'a>(
     if !goal.proposal.tasks.iter().all(|t| goal.task_done(&t.id)) {
         return Ok(None);
     }
+    let context = reconciliation_context(cwd, id, cancel, goal)?;
+    let Some(p) = prepare_worktree(&context)? else {
+        return Ok(None);
+    };
+    Ok(Some((context, p)))
+}
+
+fn reconciliation_context<'a>(
+    cwd: &'a Path,
+    id: &'a str,
+    cancel: &'a crate::cancellation::CancellationToken,
+    goal: Goal,
+) -> Result<Reconciliation<'a>> {
     let repo = anchor(cwd, &goal)?;
     let tip = goal
         .execution
@@ -688,7 +785,7 @@ fn prepare_reconciliation<'a>(
             "forge or checkout identity differs from approved proposal",
         ));
     }
-    let context = Reconciliation {
+    Ok(Reconciliation {
         cwd,
         id,
         cancel,
@@ -697,11 +794,7 @@ fn prepare_reconciliation<'a>(
         tip,
         reference,
         ctx,
-    };
-    let Some(p) = prepare_worktree(&context)? else {
-        return Ok(None);
-    };
-    Ok(Some((context, p)))
+    })
 }
 
 fn prepare_worktree(context: &Reconciliation<'_>) -> Result<Option<Publication>> {
@@ -781,19 +874,10 @@ fn prepare_worktree(context: &Reconciliation<'_>) -> Result<Option<Publication>>
     Ok(Some(p))
 }
 
-fn validate_publication_intent(
-    context: &Reconciliation<'_>,
-    p: Publication,
-) -> Result<Option<Publication>> {
+fn validate_saved_intent(context: &Reconciliation<'_>, p: &Publication) -> Result<()> {
     let Reconciliation {
-        cwd,
-        id,
-        goal,
-        tip,
-        ctx,
-        ..
+        id, goal, tip, ctx, ..
     } = context;
-    let (cwd, id) = (*cwd, *id);
     if p.tip != *tip
         || p.branch != format!("cruise/goal/{id}")
         || p.forge_kind != ctx.kind
@@ -816,10 +900,18 @@ fn validate_publication_intent(
             "saved verification or publication evidence is inconsistent",
         ));
     }
+    Ok(())
+}
+
+fn validate_publication_intent(
+    context: &Reconciliation<'_>,
+    p: Publication,
+) -> Result<Option<Publication>> {
+    validate_saved_intent(context, &p)?;
     if matches!(p.phase, Phase::WorktreeIntent | Phase::CheckIntent) {
         block(
-            cwd,
-            id,
+            context.cwd,
+            context.id,
             p,
             "Verification was interrupted. Inspect its worktree and explicitly retry verification"
                 .into(),
@@ -921,6 +1013,12 @@ fn run_approved_checks(
         p.phase = Phase::Verified;
         save(cwd, id, p.clone(), GoalStatus::Verifying, None)?;
     }
+    validate_checks_complete(context, &p)?;
+    Ok(Some(p))
+}
+
+fn validate_checks_complete(context: &Reconciliation<'_>, p: &Publication) -> Result<()> {
+    let Reconciliation { goal, tip, .. } = context;
     if p.checks.len() != goal.proposal.checks.len()
         || p.checks.iter().zip(&goal.proposal.checks).any(|(e, c)| {
             !e.passed() || e.check_id != c.id || e.argv != c.argv || e.verified_tip != *tip
@@ -930,7 +1028,7 @@ fn run_approved_checks(
             "verification evidence does not match approved checks",
         ));
     }
-    Ok(Some(p))
+    Ok(())
 }
 
 fn reconcile_push(context: &Reconciliation<'_>, mut p: Publication) -> Result<Option<Publication>> {
@@ -995,7 +1093,13 @@ fn reconcile_push(context: &Reconciliation<'_>, mut p: Publication) -> Result<Op
         save(cwd, id, p.clone(), GoalStatus::Verifying, None)?;
     }
     if p.phase == Phase::Verified {
-        match manager_forge::lookup(repo, ctx, &p.branch, &goal.proposal.target_branch, cancel) {
+        match manager_forge::lookup(
+            repo,
+            ctx,
+            &p.branch,
+            Some(&goal.proposal.target_branch),
+            cancel,
+        ) {
             Ok(None) => {}
             Ok(Some(_)) => {
                 block(cwd, id, p, "A PR already exists for the Goal branch before push. Human resolution required".into())?;
@@ -1042,69 +1146,110 @@ fn finish_publication(context: &Reconciliation<'_>, mut p: Publication) -> Resul
     } = context;
     let (cwd, id, cancel) = (*cwd, *id, *cancel);
     validate(repo, goal, &p)?;
-    let existing =
-        match manager_forge::lookup(repo, ctx, &p.branch, &goal.proposal.target_branch, cancel) {
-            Ok(pr) => pr,
-            Err(_) if cancel.is_cancelled() => return Ok(()),
-            Err(e) => {
-                block(
-                    cwd,
-                    id,
-                    p,
-                    format!("Cannot establish PR identity or absence: {e}"),
-                )?;
-                return Ok(());
-            }
-        };
-    let pr = if let Some(pr) = existing {
-        pr
-    } else {
-        if p.phase == Phase::CreateIntent {
+    let existing = match manager_forge::lookup(
+        repo,
+        ctx,
+        &p.branch,
+        Some(&goal.proposal.target_branch),
+        cancel,
+    ) {
+        Ok(pr) => pr,
+        Err(_) if cancel.is_cancelled() => return Ok(()),
+        Err(e) => {
+            return block(
+                cwd,
+                id,
+                p,
+                format!("Cannot establish PR identity or absence: {e}"),
+            );
+        }
+    };
+    if let Some(pr) = existing {
+        return record_request(context, p, pr);
+    }
+    if p.phase == Phase::CreateIntent {
+        return block(
+            cwd,
+            id,
+            p,
+            "PR create outcome uncertain, and no PR is observable. Human resolution required"
+                .into(),
+        );
+    }
+    if p.phase != Phase::Pushed {
+        return Err(error("invalid publication phase"));
+    }
+    p.phase = Phase::CreateIntent;
+    save(cwd, id, p.clone(), GoalStatus::Verifying, None)?;
+    create_and_observe(context, p)
+}
+
+fn create_and_observe(context: &Reconciliation<'_>, p: Publication) -> Result<()> {
+    let Reconciliation {
+        cwd,
+        id,
+        cancel,
+        goal,
+        repo,
+        ctx,
+        ..
+    } = context;
+    let (cwd, id, cancel) = (*cwd, *id, *cancel);
+    let create_result = manager_forge::create(
+        repo,
+        ctx,
+        manager_forge::CreateRequest {
+            source: &p.branch,
+            target: &goal.proposal.target_branch,
+            title: &goal.proposal.objective,
+            body: &publication_body(goal),
+        },
+        cancel,
+        id,
+    );
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
+    match manager_forge::lookup(
+        repo,
+        ctx,
+        &p.branch,
+        Some(&goal.proposal.target_branch),
+        cancel,
+    ) {
+        Ok(Some(pr)) => record_request(context, p, pr),
+        _ if cancel.is_cancelled() => Ok(()),
+        Ok(None)
+            if ctx.kind == crate::forge::ForgeKind::GitHub
+                && create_result
+                    .as_ref()
+                    .is_err_and(|e| e == GITHUB_TITLE_REJECTION) =>
+        {
             block(
                 cwd,
                 id,
                 p,
-                "PR create outcome uncertain, and no PR is observable. Human resolution required"
-                    .into(),
-            )?;
-            return Ok(());
+                format!(
+                    "GitHub rejected the submitted PR title ({GITHUB_TITLE_REJECTION}). Human resolution required"
+                ),
+            )
         }
-        if p.phase != Phase::Pushed {
-            return Err(error("invalid publication phase"));
-        }
-        p.phase = Phase::CreateIntent;
-        save(cwd, id, p.clone(), GoalStatus::Verifying, None)?;
-        let create_result = manager_forge::create(
-            repo,
-            ctx,
-            manager_forge::CreateRequest {
-                source: &p.branch,
-                target: &goal.proposal.target_branch,
-                title: &goal.proposal.objective,
-                body: &publication_body(goal),
-            },
-            cancel,
+        other => block(
+            cwd,
             id,
-        );
-        if cancel.is_cancelled() {
-            return Ok(());
-        }
-        match manager_forge::lookup(repo, ctx, &p.branch, &goal.proposal.target_branch, cancel) {
-            Ok(Some(pr)) => pr,
-            _ if cancel.is_cancelled() => return Ok(()),
-            other => {
-                block(
-                    cwd,
-                    id,
-                    p,
-                    format!(
-                        "PR create outcome uncertain ({create_result:?}, lookup {other:?}). Human resolution required"
-                    ),
-                )?;
-                return Ok(());
-            }
-        }
-    };
+            p,
+            format!(
+                "PR create outcome uncertain ({create_result:?}, lookup {other:?}). Human resolution required"
+            ),
+        ),
+    }
+}
+
+fn record_request(context: &Reconciliation<'_>, mut p: Publication, pr: PullRequest) -> Result<()> {
+    let Reconciliation {
+        cwd, id, goal, ctx, ..
+    } = context;
+    let (cwd, id) = (*cwd, *id);
     if !matches_request(&pr, &ctx.repository, goal, &p) {
         block(
             cwd,
