@@ -16,7 +16,7 @@ RUN=target/verify-cruise/$(date +%Y%m%d-%H%M%S); mkdir -p "$RUN"   # evidence fo
 
 `launch.sh` runs `cargo +1.99.1 build --locked --all-features --bin cruise --bin cruise-runtime --example verify_pty` (pass `--no-build` to reuse a build of the current tree), creates `ROOT` under `$TMPDIR` with its own `HOME`/`XDG_*`, a fixture Git repository at `ROOT/repo` on `main`, the workflow fixtures `ROOT/run-session.yaml` and `ROOT/choose.yaml` (command steps only; no SDK, model, or network), writes `check_base_ci: false`, and starts `cruise daemon start --port 0`. Ready means `launch.sh` printed `ROOT` and Doctor passes.
 
-Run any command inside the run with `.agents/skills/verify-cruise/scripts/in.sh "$ROOT" COMMAND...`: an empty environment plus `ROOT/env` (this checkout's `target/debug` first on `PATH`), working directory `ROOT/repo`. Browser scripts need `npm ci --prefix tests/webui --ignore-scripts` and `tests/webui/node_modules/.bin/playwright install chromium` once.
+Run any command inside the run with `.agents/skills/verify-cruise/scripts/in.sh "$ROOT" COMMAND...`: an empty environment plus `ROOT/env` (this checkout's `target/debug` first on `PATH`), working directory `ROOT/repo`. Host prerequisites: Rust 1.99.1, Git, `jq`, and Node 26.13.1. Browser scripts need `npm ci --prefix tests/webui --ignore-scripts` and `tests/webui/node_modules/.bin/playwright install chromium` once.
 
 ## Doctor
 
