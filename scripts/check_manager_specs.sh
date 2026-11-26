@@ -60,12 +60,15 @@ run_check corrections-test "$Q" test "$CORRECTIONS" --backend typescript --seed 
 require_tests "$RUN/corrections-test.log" correctedResumeLaunchesOnceTest approvalIsSpentTest launchIsNotRepeatedTest movedTipVoidsResumeTest editedWorktreeVoidsResumeTest otherAttemptVoidsResumeTest plainResumeDeliversNothingTest changeBeforeLaunchIsRefusedTest refusedCorrectionBlocksPlainResumeTest refusedCorrectionIsReviewedAgainTest armedCorrectionSurvivesRestartTest startedCorrectionIsNotReplayedTest blockedGoalLaunchesNothingTest amendmentKeepsProposalAndPlanTest amendmentIsApprovedOnceTest movedTipVoidsAmendmentTest laterAttemptUsesAmendmentTest evidenceResolvesAndFinalTipIsVerifiedTest partialEvidenceIsNotAResultTest redEvidenceLeavesTaskFailedTest unresolvedTaskBlocksDependentsTest interruptedEvidenceIsNotReplayedTest movedTipEvidenceIsNotAdoptedTest amendedContractEvidenceIsNotAdoptedTest movedTipVoidsEvidenceApprovalTest otherAttemptVoidsEvidenceApprovalTest
 run_check corrections-simulation "$Q" run --seed 20261120 --max-samples 1000 --max-steps 20 --backend typescript --invariant safety "$CORRECTIONS"
 run_check corrections-verify node scripts/formal/verify_quint.cjs "$Q" "$CORRECTIONS" manager_corrections 12 "$RUN/corrections-counterexample.itf.json"
+run_check manager-goal-projection-typecheck "$Q" typecheck tests/formal/manager_goal_projection.qnt
+run_check manager-goal-projection-test "$Q" test tests/formal/manager_goal_projection.qnt --backend typescript --seed 61
 run_check alloy java -jar target/formal-tools/alloy-6.2.0.jar exec --command '*' --solver sat4j --type json --output "$RUN/alloy" tests/formal/manager.als
 run_check alloy-receipt node scripts/formal/check_alloy_receipt.cjs tests/formal/manager.als "$RUN/alloy/receipt.json"
 run_check receipt-validator-tests node --test scripts/formal/check_alloy_receipt.test.cjs
 run_check manager-bdd cargo +1.99.1 test --locked --all-features --test manager_approval_bdd
 run_check manager-cli cargo +1.99.1 test --locked --all-features --test manager_corrective_approval
 run_check manager-publication cargo +1.99.1 test --locked --all-features --test manager_verification_retry
+run_check manager-provider-projection cargo +1.99.1 test --locked --all-features --test manager_conversation_restart_acceptance completed_goals_are_summarized_only_in_provider_context
 run_check manager-webui cargo +1.99.1 test --locked --all-features --lib webui::tests::manager::manager_retry
 run_check manager-webui-render-evidence grep -Fx \
   'test webui::tests::manager::manager_retry_distinguishes_task_from_verification_scope ... ok' \

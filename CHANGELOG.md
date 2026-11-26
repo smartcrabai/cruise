@@ -19,6 +19,7 @@
 
 ### Changed
 
+- Summarize completed Goals in Manager provider prompts without changing saved history or CLI and WebUI status.
 - Keep the built-in `e2e` flag on UI E2E tooling already in the repository. TDD now runs `e2e-baseline` before `e2e`, and refactor runs `prepare-e2e-baseline` and `e2e-final-baseline` before its E2E steps; a host guard gate retries an E2E step until it undoes changes to dependency manifests, lockfiles, toolchain pins, or CI configuration and any newly introduced E2E framework. TDD `e2e` (now saved as `e2e/report.md`) and refactor `e2e-final-check` reports must end with `E2E_STATUS: passed`, `blocked`, or `not-applicable`; `blocked` stops the session with the reported `## Blockers` preparation as its failure reason. Prepare and resume, or resume with `-f e2e=off`.
 - Stop prompting for workflow flags on `cruise run`; saved session values and explicit `-f/--flag` assignments now control execution. `exec` and `force_exec` still prompt before creating a transient session.
 - Relax Bubblewrap isolation requests: `require_bubblewrap: true` and `CRUISE_JCODE_BUBBLEWRAP=1` use isolation when available; otherwise Cruise warns and runs unconfined. CI repair commits use the host verifier when Bubblewrap and `CRUISE_CI_VERIFY_SCRIPT` are available; otherwise Cruise warns, commits and pushes without host verification, and relies on CI for the pushed head. A configured verifier failure still blocks the commit.

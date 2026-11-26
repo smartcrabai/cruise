@@ -98,6 +98,7 @@ Constraints and gotchas:
 - A failed check blocks the Goal (`status` shows `reason`). Choose `retry <GOAL>` for a flaky check, or `corrective` + `approve-corrective` to add a fix task. If verification fails again after a retry, create a fresh corrective preview rather than approving a discarded one. Failed children name the exact `resume`/`retry` command in the Goal reason.
 - `corrective --resume`, `--evidence`, and `--amend` act on an active Goal and are separate approval units: show the user each saved preview (`status --json`, `.goals[].execution.corrective_preview`) and approve only the revision they approved. `resume`/`retry` never deliver an unapproved correction. Evidence results are in `.goals[].execution.evidence_runs`; an `unresolved` outcome keeps the task failed.
 - New conversation turns and proposals need the daemon to reach the SDK provider. The WebUI **Manager** page opens only repositories with an existing record and an accessible main checkout on the daemon host.
+- Manager sends only the ID, objective, and status of completed Goals to the provider when discussing or drafting; CLI status and the WebUI still show full records.
 
 ## Which command do I want?
 

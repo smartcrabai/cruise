@@ -26,6 +26,8 @@ Approved base retargeting is covered at the production CLI, daemon, and Git boun
 
 The production regression also accepts a finalized but unintegrated result superseded by a later integrated attempt. An unintegrated latest attempt is rejected even if an older attempt was integrated; unresolved finalization, pending or interrupted resumes, and pending corrections are rejected without creating a preview.
 
+`manager_goal_projection.qnt` models the redacted snapshot boundary for Manager conversation and proposal drafting. Completed Goals expose only ID, objective, and status to the provider; unfinished Goals retain their context, and durable records remain intact. The Manager CI runner checks the model and captures the production prompt in a fake SDK regression.
+
 ## Local execution, 2026-11-20
 
 `bash scripts/check_manager_specs.sh` passed on macOS arm64. Its exact commands and output are in `target/formal-reports/manager.q9JVSV/commands.log` and the adjacent logs. The invocation ran the following substantive checks (the runner expands `Q` to the pinned binary and uses an isolated temporary backend endpoint):

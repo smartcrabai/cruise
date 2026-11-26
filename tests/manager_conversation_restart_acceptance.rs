@@ -17,6 +17,7 @@ use jcode_sdk::api::{
     API_VERSION_MAJOR, ApiEvent, ApiRequest, ClientFrame, ServerFrame, read_frame, write_frame,
 };
 
+use sha2::{Digest, Sha256};
 const FAKE_JCODE: &str = "CRUISE_TEST_MANAGER_FAKE_JCODE";
 const VALID_PROPOSAL: &str = r#"{"objective":"Deliver goal","target_branch":"main","exclusions":[],"criteria":[{"id":"c","description":"Works"}],"checks":[{"id":"check","criterion_ids":["c"],"argv":["true"]}],"tasks":[{"id":"task","instructions":"Implement","dependencies":[]}]}"#;
 
@@ -694,6 +695,131 @@ async fn propose_logs_only_response_shape_when_json_parsing_fails() {
     }
 }
 
+const PROJECTION_SECRET: &str = "fixture-secret-not-for-provider";
+
+fn seed_projection_fixture(
+    home: &Path,
+    repo: &Path,
+) -> (std::path::PathBuf, cruise::manager::Snapshot) {
+    use std::fmt::Write as _;
+
+    let common = repo
+        .join(".git")
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("canonical Git directory: {error}"));
+    let dir = home.join("data/cruise/manager");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|error| panic!("create fixture record directory: {error}"));
+    let mut key = String::with_capacity(64);
+    for byte in Sha256::digest(common.to_string_lossy().as_bytes()) {
+        write!(key, "{byte:02x}").unwrap_or_else(|error| panic!("hash formatting: {error}"));
+    }
+    let record = dir.join(format!("{key}.json"));
+    let mut proposal: Value = serde_json::from_str(VALID_PROPOSAL)
+        .unwrap_or_else(|error| panic!("fixture proposal: {error}"));
+    proposal["id"] = json!("previous-proposal");
+    proposal["revision"] = json!(1);
+    proposal["target_sha"] = json!(git(repo, &["rev-parse", "HEAD"]));
+    proposal["workflow"] = json!("builtin:tdd");
+    proposal["contract"] = json!({"anchor":repo,"origin":PROJECTION_SECRET,"forge_kind":"GitHub",
+        "forge_host":"github.com","forge_repository":"example/project","workflow":{"steps":{}}});
+    let goals: Vec<_> = [
+        "completed",
+        "paused",
+        "blocked",
+        "verifying",
+        "awaiting_merge",
+    ]
+    .into_iter()
+    .map(|status| {
+        let mut proposal = proposal.clone();
+        if status == "completed" {
+            proposal["tasks"][0]["instructions"] = json!("Archived task detail. ".repeat(120));
+        }
+        json!({"id":status,"proposal":proposal,"status":status,"reason":"fixture history",
+                "execution":{"origin":PROJECTION_SECRET,"workflow":{"steps":{}}}})
+    })
+    .collect();
+    let stored: cruise::manager::Snapshot = serde_json::from_value(
+        json!({"repository":common,"transcript":[],"proposal":proposal,"goals":goals}),
+    )
+    .unwrap_or_else(|error| panic!("valid Manager fixture: {error}"));
+    fs::write(
+        &record,
+        serde_json::to_vec(&stored).unwrap_or_else(|error| panic!("serialize fixture: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("save fixture: {error}"));
+    (record, stored)
+}
+
+#[tokio::test]
+async fn completed_goals_are_summarized_only_in_provider_context() {
+    let (root, repo) = cli_fixture();
+    let home = root.path();
+    let _stop = Stop(home);
+    let (origin, token) = start(home, true);
+    let client = daemon_client();
+    let (record, stored) = seed_projection_fixture(home, &repo);
+    fs::write(home.join("release-jcode"), "capture-context")
+        .unwrap_or_else(|error| panic!("configure provider: {error}"));
+    cli_stdout(
+        &ManagerCli::spawn(home, &repo, &["say", "Review the Goals"], None)
+            .finish()
+            .await,
+    );
+    let after = snapshot(&client, &origin, &token, &repo).await;
+    let disk: Value = serde_json::from_slice(
+        &fs::read(record).unwrap_or_else(|error| panic!("read stored record: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("parse stored record: {error}"));
+    assert_eq!(disk["goals"], json!(stored.goals));
+    assert_eq!(after["goals"], disk["goals"]);
+    let cli: Value = serde_json::from_str(&cli_stdout(
+        &ManagerCli::spawn(home, &repo, &["status", "--json"], None)
+            .finish()
+            .await,
+    ))
+    .unwrap_or_else(|error| panic!("parse CLI status: {error}"));
+    assert_eq!(cli["goals"], disk["goals"]);
+
+    let captured = fs::read_to_string(home.join("provider-context.json"))
+        .unwrap_or_else(|error| panic!("read provider JSON: {error}"));
+    let data: Value = serde_json::from_str(&captured)
+        .unwrap_or_else(|error| panic!("parse provider JSON: {error}"));
+    assert!(!captured.contains(PROJECTION_SECRET));
+    assert_eq!(
+        data["goals"][0],
+        json!({"id":"completed","objective":"Deliver goal","status":"completed"})
+    );
+    let mut old = disk;
+    old["transcript"] = data["transcript"].clone();
+    old["proposal"]["contract"] = Value::Null;
+    for goal in old["goals"]
+        .as_array_mut()
+        .unwrap_or_else(|| panic!("stored goals"))
+    {
+        goal["proposal"]["contract"] = Value::Null;
+        goal["execution"]["origin"] = Value::Null;
+        goal["execution"]["workflow"] = Value::Null;
+    }
+    assert_eq!(
+        &data["goals"]
+            .as_array()
+            .unwrap_or_else(|| panic!("provider goals"))[1..],
+        &old["goals"]
+            .as_array()
+            .unwrap_or_else(|| panic!("old provider goals"))[1..]
+    );
+    assert_eq!(data["proposal"], old["proposal"]);
+    println!(
+        "completed Goal JSON: {} -> {} bytes; full provider STATE JSON: {} -> {} bytes",
+        old["goals"][0].to_string().len(),
+        data["goals"][0].to_string().len(),
+        old.to_string().len(),
+        captured.len()
+    );
+}
+
 fn send_fake_reply(socket: &mut UnixStream, session_id: &str, fixture: &str, proposal: bool) {
     let alternate = match fixture {
         "missing-branch" => {
@@ -782,6 +908,26 @@ fn manager_fake_jcode_runtime() {
             );
             let fixture = fs::read_to_string(release_path)
                 .unwrap_or_else(|error| panic!("read fake response fixture: {error}"));
+            if fixture == "capture-context" {
+                let request: Value = serde_json::from_str(&serialized)
+                    .unwrap_or_else(|error| panic!("parse SDK request: {error}"));
+                let text = request
+                    .as_object()
+                    .unwrap_or_else(|| panic!("SDK request map"))
+                    .values()
+                    .filter_map(Value::as_str)
+                    .find_map(|value| value.split_once("\n\nSTATE JSON:\n"))
+                    .unwrap_or_else(|| panic!("SDK received Manager state"))
+                    .1;
+                let (context, _) = text
+                    .split_once("\n\n")
+                    .unwrap_or_else(|| panic!("state before instruction"));
+                fs::write(
+                    release_path.with_file_name("provider-context.json"),
+                    context,
+                )
+                .unwrap_or_else(|error| panic!("save fake provider evidence: {error}"));
+            }
             let proposal = serialized.contains("Create a proposal for human review");
             send_fake_reply(&mut socket, session_id, &fixture, proposal);
             continue;
