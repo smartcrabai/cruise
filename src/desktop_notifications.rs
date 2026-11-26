@@ -393,6 +393,7 @@ mod tests {
                     session_id: sid.clone(),
                     request_id: "r".into(),
                     prompt: "prompt".into(),
+                    has_image: false,
                     choices: vec![],
                 },
                 Some((

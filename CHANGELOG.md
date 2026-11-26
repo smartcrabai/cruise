@@ -15,6 +15,7 @@
 - Refuse daemon startup while the v0.3.0 detached WebUI is live; `cruise daemon stop` can stop both servers and cancels legacy work, leaving its sessions `Suspended`.
 - Refuse to run or plan a session while another cruise process recorded as its live runner (for example a v0.3.0 `cruise run` still in progress during an upgrade) is executing it; the daemon answers 409 and the CLI exits 1 without changing session state. v0.3.0 background planning workers record no runner, so let background plans started before the upgrade finish before acting on those sessions.
 - Replace the `android` UI E2E policy ID with `jetpack-compose`. Android Views targets without Compose follow the common policy for unlisted targets.
+- Built-in `formal_methods` starts execution with a Quint-only model and PNG approval in a WebUI session panel or the CLI, then rechecks the approved model and includes available evidence in the PR/MR. The CLI never opens an external viewer. Flag-off runs and existing snapshots keep their workflow behavior.
 - Remove after-PR automation and its `after_pr` and `merge` flags from the built-in `refactor`, `add-tests`, `add-formal-specs`, and `security` workflows. `exec` still does not create PRs; `--no-force-exec` still allows regular worktree PR creation without after-PR automation.
 
 ### Changed

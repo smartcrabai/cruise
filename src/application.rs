@@ -33,6 +33,7 @@ pub use plan::{ApproveRequest, PlanStart};
 mod exec;
 mod list;
 pub use exec::ExecStartRequest;
+mod quint;
 mod run;
 pub use run::{InstructionHistoryEntry, RunAllRequest, TellReceipt, TellRequest};
 
@@ -175,6 +176,8 @@ pub enum ApplicationEvent {
         request_id: String,
         prompt: String,
         choices: Vec<OptionChoicePayload>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        has_image: bool,
     },
     PrCreated {
         session_id: String,
@@ -339,6 +342,9 @@ struct PendingRequest {
     claim_identity: u64,
     kind: PendingKind,
     choices: Option<Vec<OptionChoicePayload>>,
+    question: Option<String>,
+    image: Option<crate::quint_workflow::Image>,
+    image_served: bool,
     sender: mpsc::Sender<PromptResponse>,
 }
 
@@ -1311,6 +1317,18 @@ impl ApplicationRuntime {
         question: Option<&str>,
         choices: Option<&[OptionChoice]>,
     ) -> Result<(String, mpsc::Receiver<PromptResponse>)> {
+        self.register_prompt_with_image(session_id, claim_identity, kind, question, choices, None)
+    }
+
+    fn register_prompt_with_image(
+        &self,
+        session_id: &str,
+        claim_identity: u64,
+        kind: PendingKind,
+        question: Option<&str>,
+        choices: Option<&[OptionChoice]>,
+        image: Option<crate::quint_workflow::Image>,
+    ) -> Result<(String, mpsc::Receiver<PromptResponse>)> {
         let claims = self
             .claims
             .lock()
@@ -1341,6 +1359,9 @@ impl ApplicationRuntime {
                 claim_identity,
                 kind,
                 choices: payload,
+                question: question.map(str::to_owned),
+                image,
+                image_served: false,
                 sender,
             },
         );
@@ -1458,6 +1479,14 @@ impl ApplicationRuntime {
             ));
         }
         if let PromptResponse::Option(result) = &response {
+            if request.image.is_some()
+                && result.next_step.as_deref() == Some(quint::APPROVE)
+                && !request.image_served
+            {
+                return Err(CruiseError::Other(
+                    "Open the Quint diagram before approving".into(),
+                ));
+            }
             let valid = request.choices.as_ref().is_some_and(|choices| {
                 choices.iter().any(|choice| {
                     let next_matches = choice.next_step == result.next_step;
@@ -1531,30 +1560,32 @@ impl ApplicationRuntime {
             .iter()
             .filter(|&(_request_id, request)| request.session_id == session_id)
             .map(|(request_id, request)| {
-                (request_id.clone(), request.kind, request.choices.clone())
+                (
+                    request_id.clone(),
+                    request.kind,
+                    request.choices.clone(),
+                    request.question.clone(),
+                    request.image.is_some(),
+                )
             })
             .collect::<Vec<_>>();
         drop(requests);
         prompts.sort_by(|a, b| a.0.cmp(&b.0));
         prompts
             .into_iter()
-            .map(|(request_id, kind, choices)| PendingPrompt {
-                request_id,
-                session_id: session_id.to_string(),
-                kind: match kind {
-                    PendingKind::Ask => PendingPromptKind::Ask,
-                    PendingKind::Option => PendingPromptKind::Option,
+            .map(
+                |(request_id, kind, choices, question, has_image)| PendingPrompt {
+                    request_id,
+                    session_id: session_id.to_string(),
+                    kind: match kind {
+                        PendingKind::Ask => PendingPromptKind::Ask,
+                        PendingKind::Option => PendingPromptKind::Option,
+                    },
+                    question,
+                    has_image,
+                    choices: choices.unwrap_or_default(),
                 },
-                question: (kind == PendingKind::Ask)
-                    .then(|| {
-                        self.manager
-                            .load(session_id)
-                            .ok()
-                            .and_then(|state| state.pending_ask_question)
-                    })
-                    .flatten(),
-                choices: choices.unwrap_or_default(),
-            })
+            )
             .collect()
     }
 }
@@ -1891,6 +1922,8 @@ pub struct PendingPrompt {
     pub kind: PendingPromptKind,
     pub question: Option<String>,
     pub choices: Vec<OptionChoicePayload>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_image: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3320,6 +3353,10 @@ impl CruiseApplication {
     #[must_use]
     pub fn pending_prompts(&self, session_id: &str) -> Vec<PendingPrompt> {
         self.runtime.pending_prompts(session_id)
+    }
+
+    pub(crate) fn prompt_image(&self, session_id: &str, request_id: &str) -> Result<Vec<u8>> {
+        self.runtime.prompt_image(session_id, request_id)
     }
 
     /// Update persisted session settings.
@@ -5272,6 +5309,7 @@ fn setup_run_blocking(
         crate::flags::validate_names(&config, &flags)?;
         state.flags = flags;
     }
+    crate::quint_workflow::configure(&config, &mut state)?;
     if state.pr_target.is_some() {
         crate::pr_review_fix::validate_workflow(&config)?;
     }
@@ -5338,7 +5376,12 @@ fn prepare_run_graph(
     let mut exec_resume = None;
     let entry = if after_pr {
         dag.start.clone()
-    } else if state.exec {
+    } else if state.exec
+        && !state
+            .quint_run
+            .as_ref()
+            .is_some_and(crate::quint_workflow::Run::finalizing)
+    {
         let failed = matches!(state.phase, SessionPhase::Failed(_));
         let selection = crate::graph::prepare_exec_resume(
             &mut dag,
@@ -5804,6 +5847,10 @@ fn runtime_run_handlers(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Quint review brackets the same workflow and publication claim"
+)]
 async fn execute_run(
     manager: &SessionManager,
     claim: &OperationClaim,
@@ -5831,6 +5878,16 @@ async fn execute_run(
         )
         .await;
     }
+    quint::begin_review(
+        manager,
+        claim,
+        setup,
+        inputs,
+        &handlers.option,
+        &on_start,
+        &on_log,
+    )
+    .await?;
     let on_node_start =
         node_checkpoint_callback(manager.clone(), id.to_string(), manager.dag_path(id));
     let config_reloader = crate::session_config::config_reloader_for_reference(
@@ -5880,6 +5937,9 @@ async fn execute_run(
         _ => workflow.finish_result(&execution),
     }
     refresh_run_after_execution(manager, id, setup, inputs, &mut execution);
+    if let Ok(result) = &execution {
+        quint::finish_review(manager, claim, setup, result.failed, &on_start, &on_log).await?;
+    }
     match execution {
         Err(error) => Err(error),
         Ok(_) if claim.token().is_cancelled() => Err(CruiseError::Interrupted),
@@ -6484,7 +6544,7 @@ impl OptionHandler for RuntimeOptionHandler {
             &self.session_id,
             self.claim_identity,
             PendingKind::Option,
-            None,
+            Some(&prompt),
             Some(choices),
         )?;
         self.sink.send(ApplicationEvent::OptionRequired {
@@ -6492,6 +6552,7 @@ impl OptionHandler for RuntimeOptionHandler {
             request_id: id.clone(),
             prompt,
             choices: payload,
+            has_image: false,
         })?;
         match self.runtime.wait_prompt(
             &self.session_id,
@@ -6512,59 +6573,7 @@ impl OptionHandler for RuntimeOptionHandler {
         plan: Option<&'a str>,
         token: Option<&'a CancellationToken>,
     ) -> Pin<Box<dyn Future<Output = Result<OptionResult>> + Send + 'a>> {
-        let runtime = Arc::clone(&self.runtime);
-        let sink = Arc::clone(&self.sink);
-        let session_id = self.session_id.clone();
-        let claim_identity = self.claim_identity;
-        let effective = token.cloned().unwrap_or_else(|| self.token.clone());
-        let prompt = plan.unwrap_or("Select an option").to_string();
-        let payload = choices
-            .iter()
-            .map(option_choice_payload)
-            .collect::<Vec<_>>();
-        Box::pin(async move {
-            if choices.is_empty() {
-                return Ok(OptionResult {
-                    next_step: None,
-                    text_input: None,
-                });
-            }
-            let (id, receiver) = runtime.register_prompt(
-                &session_id,
-                claim_identity,
-                PendingKind::Option,
-                None,
-                Some(choices),
-            )?;
-            if let Err(error) = sink.send(ApplicationEvent::OptionRequired {
-                session_id: session_id.clone(),
-                request_id: id.clone(),
-                prompt,
-                choices: payload,
-            }) {
-                runtime.unregister_prompt(&id, &session_id, claim_identity);
-                return Err(error);
-            }
-            let wait = tokio::task::spawn_blocking(move || {
-                runtime.wait_prompt(
-                    &session_id,
-                    &id,
-                    claim_identity,
-                    &receiver,
-                    Some(&effective),
-                )
-            })
-            .await
-            .map_err(|error| {
-                CruiseError::Other(format!("option prompt worker failed: {error}"))
-            })??;
-            match wait {
-                PromptResponse::Option(result) => Ok(result),
-                PromptResponse::Ask(_) => Err(CruiseError::Other(
-                    "received ask response for option prompt".to_string(),
-                )),
-            }
-        })
+        Box::pin(self.select_with_image(choices, plan, token, None))
     }
 }
 

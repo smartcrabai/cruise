@@ -74,6 +74,18 @@ pre_steps:
     command: nix develop --command true
 ```
 
+<a id="quint-workflow-review"></a>
+### Quint workflow review
+
+For `builtin:tdd` or `builtin:refactor` with `-f formal_methods`, install Node.js and the pinned tools on the **daemon host**. On Unix:
+
+```sh
+npm install --prefix "${XDG_DATA_HOME:-$HOME/.local/share}/cruise/quint-tools" --save-exact \
+  @informalsystems/quint@0.33.0 @viz-js/viz@3.31.0 @resvg/resvg-js@2.6.2
+```
+
+On Windows with no `XDG_DATA_HOME`, use `%LOCALAPPDATA%/cruise/data/quint-tools`. `flags.formal_methods.quint_review: true` survives workflow ejection and new snapshots. The host gate cannot be skipped; changing the flag after execution starts requires a reset. The PNG shows transitions from passing tests, not exhaustive exploration. The plan's **Verify** action and `builtin:add-formal-specs` are separate and unchanged.
+
 <a id="config-file-reference"></a>
 ## Config File Reference
 

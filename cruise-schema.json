@@ -216,6 +216,10 @@
         "description": {
           "type": "string",
           "description": "Human-readable description of the flag"
+        },
+        "quint_review": {
+          "type": "boolean",
+          "description": "Enable the host-owned model review boundary when formal_methods is on."
         }
       }
     },

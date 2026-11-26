@@ -75,8 +75,9 @@ export default function SessionDetail(props) {
           Diff
         </button>
       </nav>
-      <div id={`tab-panel-${props.id}`} class="md:flex-1 md:min-h-0 md:overflow-auto">
-        {props.tabPanel}
+      <div class="md:flex-1 md:min-h-0 md:overflow-auto">
+        <div id={`quint-review-${props.id}`}>{props.quintReview}</div>
+        <div id={`tab-panel-${props.id}`}>{props.tabPanel}</div>
       </div>
     </div>
   );

@@ -335,6 +335,9 @@ pub struct FlagConfig {
     /// Human-readable description shown when asking for the value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Make this flag control the host-owned Quint review boundary.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quint_review: bool,
 }
 
 /// A value represented by either one string or a list of strings.
@@ -1715,8 +1718,13 @@ fn validate_flags(config: &WorkflowConfig) -> crate::error::Result<()> {
         }
     }
 
-    for name in config.flags.keys() {
-        if !used.contains(name.as_str()) {
+    for (name, flag) in &config.flags {
+        if flag.quint_review && name != "formal_methods" {
+            return Err(CruiseError::InvalidStepConfig(
+                "quint_review can only be set on formal_methods".into(),
+            ));
+        }
+        if !flag.quint_review && !used.contains(name.as_str()) {
             return Err(CruiseError::InvalidStepConfig(format!(
                 "flag '{name}' is declared but no step references it"
             )));

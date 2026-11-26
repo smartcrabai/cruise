@@ -246,11 +246,19 @@ pub(crate) fn session_sync_partials(state: &WebState, id: &str, version: &str) -
             &super::pages::tab_panel_html(state, id, tab)?,
         ));
     }
+    out.push_str(&quint_review_partial(state, id)?);
     out.push_str(&replace(
         &format!("session-sync-{id}"),
         &session_sync_html(state, id, version)?,
     ));
     Ok(out)
+}
+
+fn quint_review_partial(state: &WebState, id: &str) -> Result<String> {
+    Ok(by_id(
+        &format!("quint-review-{id}"),
+        &super::pages::pending_option_html(state, id, true)?,
+    ))
 }
 
 fn visible_in_sidebar(session: &crate::session::SessionState) -> bool {
@@ -434,6 +442,7 @@ pub(crate) fn option_dialog_html(
     request_id: &str,
     prompt: &str,
     choices: &[crate::application::OptionChoicePayload],
+    has_image: bool,
 ) -> Result<String> {
     let session = state.application.read_session(session_id).ok();
     if session
@@ -464,6 +473,11 @@ pub(crate) fn option_dialog_html(
         session_title,
         request_id: request_id.to_string(),
         prompt: prompt.to_string(),
+        image_url: if has_image {
+            format!("/webui/sessions/{session_id}/prompts/{request_id}/image")
+        } else {
+            String::new()
+        },
         choices: selectors,
         has_text_input: text_choice.is_some(),
         text_label: text_choice.map_or_else(|| "Answer".to_string(), |choice| choice.label.clone()),
@@ -697,15 +711,23 @@ fn try_for_event(state: &WebState, event: &ApplicationEvent) -> Result<Vec<SseMe
             request_id,
             prompt,
             choices,
+            has_image,
         } => {
-            let dialog = option_dialog_html(state, session_id, request_id, prompt, choices)?;
-            if dialog.is_empty() {
-                out.push(SseMessage::Html(header_and_row(state, session_id, None)?));
-                out.extend(notify(state, ToastKind::InputRequired, prompt));
-                return Ok(out);
-            }
+            let mut html = if *has_image {
+                let mut html = header_and_row(state, session_id, None)?;
+                html.push_str(&quint_review_partial(state, session_id)?);
+                html
+            } else {
+                let dialog =
+                    option_dialog_html(state, session_id, request_id, prompt, choices, false)?;
+                if dialog.is_empty() {
+                    out.push(SseMessage::Html(header_and_row(state, session_id, None)?));
+                    out.extend(notify(state, ToastKind::InputRequired, prompt));
+                    return Ok(out);
+                }
+                targeted("#dialogs", "beforeend", &dialog)
+            };
             let input = session_input(state, session_id);
-            let mut html = targeted("#dialogs", "beforeend", &dialog);
             html.push_str(&sse_toast(
                 state,
                 ToastKind::InputRequired,

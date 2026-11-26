@@ -238,11 +238,19 @@ impl<'a> TerminalEvents<'a> {
         request_id: &str,
         prompt: Option<&str>,
         choices: &[OptionChoicePayload],
+        has_image: bool,
     ) -> Result<()> {
         if !self.handled_prompts.insert(request_id.to_owned()) {
             return Ok(());
         }
-        let result = prompt_option(&self.session_id, prompt, choices)?;
+        let result = prompt_option_with_image(
+            self.client,
+            &self.session_id,
+            request_id,
+            prompt,
+            choices,
+            has_image,
+        )?;
         answer_or_note(
             self.client,
             &self.session_id,
@@ -299,7 +307,10 @@ impl SessionEventHandler for TerminalEvents<'_> {
                 request_id,
                 prompt,
                 choices,
-            } if self.owns(session_id) => self.option(request_id, Some(prompt), choices),
+                has_image,
+            } if self.owns(session_id) => {
+                self.option(request_id, Some(prompt), choices, *has_image)
+            }
             _ => Ok(()),
         }
     }
@@ -345,6 +356,7 @@ impl SessionEventHandler for TerminalEvents<'_> {
                         &prompt.request_id,
                         prompt.question.as_deref(),
                         &prompt.choices,
+                        prompt.has_image,
                     )?;
                 }
             }
@@ -389,8 +401,9 @@ impl<'a> BatchPrompts<'a> {
                 request_id,
                 prompt,
                 choices,
+                has_image,
             } if accepts_batch_prompt(&self.sessions, session_id) => {
-                return self.option(session_id, request_id, Some(prompt), choices);
+                return self.option(session_id, request_id, Some(prompt), choices, *has_image);
             }
             _ => {}
         }
@@ -413,6 +426,7 @@ impl<'a> BatchPrompts<'a> {
                     &prompt.request_id,
                     prompt.question.as_deref(),
                     &prompt.choices,
+                    prompt.has_image,
                 )?,
             }
         }
@@ -439,12 +453,20 @@ impl<'a> BatchPrompts<'a> {
         request_id: &str,
         prompt: Option<&str>,
         choices: &[OptionChoicePayload],
+        has_image: bool,
     ) -> Result<()> {
         let key = (session_id.to_owned(), request_id.to_owned());
         if !self.handled.insert(key) {
             return Ok(());
         }
-        let answer = prompt_option(session_id, prompt, choices)?;
+        let answer = prompt_option_with_image(
+            self.client,
+            session_id,
+            request_id,
+            prompt,
+            choices,
+            has_image,
+        )?;
         answer_or_note(
             self.client,
             session_id,
@@ -512,6 +534,15 @@ pub fn prompt_option(
     prompt: Option<&str>,
     choices: &[OptionChoicePayload],
 ) -> Result<crate::step::option::OptionResult> {
+    run_option_menu(session_id, prompt, choices, None)
+}
+
+fn run_option_menu(
+    session_id: &str,
+    prompt: Option<&str>,
+    choices: &[OptionChoicePayload],
+    image: Option<&LocalOptionImage>,
+) -> Result<crate::step::option::OptionResult> {
     if !std::io::stdin().is_terminal() {
         return Err(waiting_for_input(session_id));
     }
@@ -519,6 +550,9 @@ pub fn prompt_option(
     let _blocked = crate::herdr::blocked(prompt.unwrap_or("Select an option"));
     tokio::task::block_in_place(|| {
         let _guard = crate::option_handler::prompt_lock_guard();
+        if let Some(image) = image {
+            image.show();
+        }
         crate::step::option::run_option(&choices, prompt.filter(|text| !text.is_empty()))
     })
 }
@@ -530,6 +564,115 @@ fn option_choice(payload: &OptionChoicePayload) -> OptionChoice {
         OptionChoiceKind::Selector => OptionChoice::Selector { label, next },
         OptionChoiceKind::TextInput => OptionChoice::TextInput { label, next },
     }
+}
+
+struct LocalOptionImage {
+    dir: std::path::PathBuf,
+    png: Vec<u8>,
+}
+
+impl LocalOptionImage {
+    fn show(&self) {
+        let path = self.dir.join("quint.png");
+        eprintln!("Quint PNG: {}", path.display());
+        eprintln!("Open this file manually while the menu is active.");
+        if !std::io::stderr().is_terminal()
+            || std::env::var_os("TMUX").is_some()
+            || std::env::var_os("STY").is_some()
+        {
+            return;
+        }
+        let term = std::env::var("TERM");
+        let kitty =
+            term.as_deref() == Ok("xterm-kitty") || std::env::var_os("KITTY_WINDOW_ID").is_some();
+        let iterm = std::env::var("TERM_PROGRAM").as_deref() == Ok("iTerm.app");
+        if term.as_deref() == Ok("dumb") || (!kitty && !iterm) {
+            return;
+        }
+        let mut stderr = std::io::stderr().lock();
+        let _ = write_terminal_png(&mut stderr, &self.png, kitty);
+    }
+}
+
+fn write_terminal_png(
+    output: &mut impl std::io::Write,
+    png: &[u8],
+    kitty: bool,
+) -> std::io::Result<()> {
+    use base64::{display::Base64Display, engine::general_purpose::STANDARD};
+    let encode = |bytes| Base64Display::new(bytes, &STANDARD);
+    if kitty {
+        let mut chunks = png.chunks(3072).peekable();
+        let mut first = true;
+        while let Some(chunk) = chunks.next() {
+            let control = if first { "a=T,f=100,q=2,r=12," } else { "" };
+            write!(
+                output,
+                "\x1b_G{control}m={};{}\x1b\\",
+                u8::from(chunks.peek().is_some()),
+                encode(chunk)
+            )?;
+            first = false;
+        }
+    } else {
+        const ARGS: &str = "inline=1;width=60%;height=12;preserveAspectRatio=1";
+        if png.len() > 750_000 {
+            write!(output, "\x1b]1337;MultipartFile={ARGS}\x07")?;
+            for chunk in png.chunks(750_000) {
+                write!(output, "\x1b]1337;FilePart={}\x07", encode(chunk))?;
+            }
+            output.write_all(b"\x1b]1337;FileEnd\x07")?;
+        } else {
+            write!(output, "\x1b]1337;File={ARGS}:{}\x07", encode(png))?;
+        }
+    }
+    writeln!(output)?;
+    output.flush()
+}
+
+impl Drop for LocalOptionImage {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn prompt_option_with_image(
+    client: &DaemonClient,
+    session_id: &str,
+    request_id: &str,
+    prompt: Option<&str>,
+    choices: &[OptionChoicePayload],
+    has_image: bool,
+) -> Result<crate::step::option::OptionResult> {
+    if !has_image {
+        return prompt_option(session_id, prompt, choices);
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err(waiting_for_input(session_id));
+    }
+    let result: Result<_> = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            let bytes = client.prompt_image(session_id, request_id).await?;
+            let dir = std::env::temp_dir().join(format!("cruise-quint-{}", uuid::Uuid::new_v4()));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt as _;
+                std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+            }
+            #[cfg(not(unix))]
+            std::fs::create_dir(&dir)?;
+            let guard = LocalOptionImage { dir, png: bytes };
+            #[cfg(windows)]
+            crate::platform::set_owner_only_acl(&guard.dir)?;
+            std::fs::write(guard.dir.join("quint.png"), &guard.png)?;
+            Ok(guard)
+        })
+    });
+    let image = result.map_err(|error| {
+        eprintln!("Could not download the Quint PNG: {error}. Use the WebUI to review it.");
+        waiting_for_input(session_id)
+    })?;
+    run_option_menu(session_id, prompt, choices, Some(&image))
 }
 
 fn waiting_for_input(session_id: &str) -> CruiseError {
@@ -567,6 +710,41 @@ fn answer_or_note(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_png_preserves_image_bytes_across_protocol_chunks()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        let png = vec![0x8f_u8; 800_000];
+        for kitty in [true, false] {
+            let mut output = Vec::new();
+            write_terminal_png(&mut output, &png, kitty)?;
+            let output = String::from_utf8(output)?;
+            let mut payload = String::new();
+            if kitty {
+                let chunks: Vec<_> = output.trim_end().split_terminator("\x1b\\").collect();
+                for (index, chunk) in chunks.iter().enumerate() {
+                    let (control, data) = chunk.split_once(';').ok_or("missing Kitty separator")?;
+                    assert_eq!(control.ends_with("m=0"), index + 1 == chunks.len());
+                    assert!(data.len() <= 4096);
+                    payload.push_str(data);
+                }
+            } else {
+                assert!(output.starts_with("\x1b]1337;MultipartFile=inline=1;"));
+                assert!(output.ends_with("\x1b]1337;FileEnd\x07\n"));
+                for part in output
+                    .split('\x07')
+                    .filter_map(|part| part.strip_prefix("\x1b]1337;FilePart="))
+                {
+                    assert!(part.len() <= 1_000_000);
+                    payload.push_str(part);
+                }
+            }
+            assert_eq!(STANDARD.decode(payload)?, png);
+        }
+        Ok(())
+    }
 
     #[test]
     fn selector_payload_keeps_the_selected_route() {

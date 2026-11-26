@@ -77,6 +77,7 @@ mod pr_template;
 pub mod prompt_render;
 pub mod provider_install;
 pub mod quality_gate;
+mod quint_workflow;
 pub mod repo_clone;
 pub mod request_context;
 pub mod resolver;

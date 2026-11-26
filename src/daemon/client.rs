@@ -227,6 +227,34 @@ impl DaemonClient {
         decode_response(response).await
     }
 
+    pub(crate) async fn prompt_image(&self, session_id: &str, request_id: &str) -> Result<Vec<u8>> {
+        let url = self.api_url(&format!("sessions/{session_id}/prompts/{request_id}/image"))?;
+        let mut response = self
+            .http
+            .get(url)
+            .bearer_auth(&self.token)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|error| CruiseError::Other(format!("Quint image request failed: {error}")))?;
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| CruiseError::Other(format!("Quint image download failed: {error}")))?
+        {
+            if bytes.len() + chunk.len() > crate::quint_workflow::MAX_PNG {
+                return Err(CruiseError::Other("Quint image exceeds 1 MiB".into()));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        crate::quint_workflow::ensure_png(&bytes)?;
+        Ok(bytes)
+    }
+
     /// Post a typed JSON request and decode its JSON response.
     pub(crate) async fn post_json<B, T>(&self, path: &str, body: &B) -> Result<T>
     where

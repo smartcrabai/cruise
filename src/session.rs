@@ -244,6 +244,8 @@ pub struct SessionState {
     /// Identifies an explicitly requested execution, independently of display state.
     #[serde(default)]
     pub execution_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) quint_run: Option<crate::quint_workflow::Run>,
     /// True when `current_step` should be resolved as a graph node id rather
     /// than a legacy step name. New fixed-topology checkpoints use the
     /// compiled step name as the stable node id; older expanded graphs may use
@@ -397,6 +399,7 @@ impl SessionState {
             has_dag: false,
             execution_stage: SessionExecutionStage::Main,
             execution_id: Some(uuid::Uuid::new_v4().to_string()),
+            quint_run: None,
             current_step_is_node_id: false,
             published_issue_url: None,
             exec: false,
@@ -594,6 +597,7 @@ impl SessionState {
         self.has_dag = false;
         self.execution_stage = SessionExecutionStage::Main;
         self.execution_id = Some(uuid::Uuid::new_v4().to_string());
+        self.quint_run = None;
         self.current_step_is_node_id = false;
     }
 

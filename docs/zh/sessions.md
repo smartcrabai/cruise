@@ -74,6 +74,8 @@ Cruise 遵循 [XDG 基本目录规范](https://specifications.freedesktop.org/ba
 
    没有 PR 的符合条件的本地工作树会话，可以暂存 squash 合并并保留会话；也可以显式合并并清理工作树、分支和会话。
 
+启用 `formal_methods` 时，普通步骤开始前会等待 PNG 审批。非交互 CLI 通过 WebUI 或重新连接终端作答。拒绝会停止且不创建 PR；修改或中断后继续会发出新请求。发布前重新验证已批准的版本，并在 PR/MR 正文及发布重试中保留可共享的实际证据。
+
 <a id="model-and-fallback-notices"></a>
 ## 模型和回退通知
 

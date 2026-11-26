@@ -71,7 +71,7 @@ fn tdd_materializes_one_opt_in_advisor_pass() {
                 "implement-after-tests",
                 "advise",
                 "apply-advice",
-                "formal-methods"
+                "e2e-baseline"
             ]),
         "unexpected tdd step order: {ids:?}"
     );
@@ -91,7 +91,7 @@ fn tdd_materializes_one_opt_in_advisor_pass() {
     );
     assert!(matches!(
         advise.if_condition.as_ref().and_then(|condition| condition.fail.as_ref()),
-        Some(FailAction::Goto(target)) if target == "formal-methods"
+        Some(FailAction::Goto(target)) if target == "e2e-baseline"
     ));
     assert!(apply.if_condition.is_none());
     for input in [
@@ -285,7 +285,7 @@ fn assert_force_exec_without_after_pr(name: &str, config: WorkflowConfig) {
     assert!(config.force_exec(), "{name} must stay force_exec");
     if name == "refactor" {
         assert!(
-            config.flags.contains_key("formal_methods"),
+            config.flags["formal_methods"].quint_review,
             "refactor lost formal_methods"
         );
     }
@@ -739,6 +739,9 @@ fn worker(root: &Path, phase: &str) {
                     Some(&project),
                 )
                 .unwrap();
+                if builtin.name == "tdd" {
+                    assert!(config.flags["formal_methods"].quint_review);
+                }
                 if builtin.name == "pr-review-fix" {
                     assert_pr_review_contract(config);
                 } else if is_force_exec_builtin(builtin.name) {

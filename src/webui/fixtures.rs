@@ -308,6 +308,7 @@ fn shell_fixtures() -> Vec<(&'static str, Value)> {
                 header: RawHtml::new("<header id=\"session-header-s1\"></header>"),
                 sync: RawHtml::new("<div id=\"session-sync-s1\"></div>"),
                 ask_panel: RawHtml::empty(),
+                quint_review: RawHtml::empty(),
                 settings: RawHtml::empty(),
                 editor: RawHtml::empty(),
                 active_tab: "plan".to_string(),
@@ -501,6 +502,7 @@ fn form_fixtures() -> Vec<(&'static str, Value)> {
                 session_title: "Add a WebUI".to_string(),
                 request_id: "r1".to_string(),
                 prompt: "Pick a branch".to_string(),
+                image_url: String::new(),
                 choices: vec![ChoiceVm {
                     label: "Continue".to_string(),
                     selector: true,

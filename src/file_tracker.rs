@@ -170,6 +170,33 @@ fn take_current_snapshot(root: impl AsRef<Path>) -> Result<Snapshot> {
     Ok(snapshot)
 }
 
+pub(crate) fn fingerprint(root: &Path) -> Result<String> {
+    let mut files: Vec<_> = take_current_snapshot(root)?.into_iter().collect();
+    files.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    let mut hash = Sha256::new();
+    for (path, digest) in files {
+        let path_bytes = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .as_os_str()
+            .as_encoded_bytes();
+        hash.update((path_bytes.len() as u64).to_le_bytes());
+        hash.update(path_bytes);
+        hash.update(digest);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            hash.update(
+                std::fs::symlink_metadata(&path)?
+                    .permissions()
+                    .mode()
+                    .to_le_bytes(),
+            );
+        }
+    }
+    Ok(crate::http_download::hex_digest(&hash.finalize()))
+}
+
 /// Compute the SHA-256 hash of a file.
 fn hash_file(path: &Path) -> Result<FileHash> {
     let content = std::fs::read(path)?;
