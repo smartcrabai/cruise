@@ -200,7 +200,7 @@ pub enum ManagerCommand {
     },
     /// Retry a goal or start a fresh task attempt.
     Retry {
-        /// Goal ID. Without TASK, retry verification of a blocked goal.
+        /// Goal ID. Without TASK, retry blocked verification or a proven GitHub title rejection.
         goal: String,
         /// Reserve a fresh attempt for this task.
         task: Option<String>,

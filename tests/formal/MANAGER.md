@@ -18,6 +18,8 @@ The Quint model is a bounded abstraction of approval authorization, asynchronous
 
 Alloy explicitly selects all named commands with SAT4J. The model embeds `expect 0` for checks and `expect 1` for witnesses, the syntax supported by the pinned Alloy CLI (which has no `exec --expect` option). The receipt validator independently checks that every assertion is UNSAT and every witness has a concrete SAT instance. The retry witnesses cover same-tip rejection of the discarded preview, approval of the next revision, and unchanged state after rejected retry. Gherkin invokes the real Manager API and CLI against isolated Git repositories with saved failed-verification fixtures. The runner also exercises Manager CLI regression tests and the production WebUI route and render tests. These checks do not cover the full daemon or forge lifecycle.
 
+GitHub title rejection is outside the Quint and Alloy abstractions. The `manager_verification_retry` regression exercises the production CLI and authenticated Manager API with a disposable daemon, Git refs, and forge subprocess fixtures. It checks Unicode title bounds and unchanged short titles, lossless Objective text, explicit recovery of a definite legacy rejection, adoption of a matching existing PR, and refusal on ambiguous failures, missing evidence, mismatched refs, and failed observations.
+
 ## Local execution, 2026-11-20
 
 `bash scripts/check_manager_specs.sh` passed on macOS arm64. Its exact commands and output are in `target/formal-reports/manager.q9JVSV/commands.log` and the adjacent logs. The invocation ran the following substantive checks (the runner expands `Q` to the pinned binary and uses an isolated temporary backend endpoint):

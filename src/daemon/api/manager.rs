@@ -221,7 +221,7 @@ pub(crate) fn dispatch_action(
                 let goal = if let Some(task_id) = task_id {
                     coordinator::retry_task(&state.application, cwd, &goal_id, &task_id)?
                 } else {
-                    coordinator::retry_verification(cwd, &goal_id)?
+                    coordinator::retry_goal(cwd, &goal_id, &state.manager_stop)?
                 };
                 coordinator::wake();
                 serde_json::to_value(goal)?
