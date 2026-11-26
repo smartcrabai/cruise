@@ -302,7 +302,9 @@ fn preview_corrective(snapshot: &Value, args: ManagerCorrectiveArgs, tty: bool) 
         .as_str()
         .ok_or_else(|| error("corrective_missing_tip"))?;
     let mut action = json!({"type":"preview_corrective", "goal_id":args.goal, "expected_tip":tip});
-    if let Some(file) = args.amend {
+    if args.retarget {
+        action["retarget"] = json!({});
+    } else if let Some(file) = args.amend {
         action["amendment"] = serde_json::from_str(&std::fs::read_to_string(file)?)?;
     } else if args.evidence {
         action["evidence"] =

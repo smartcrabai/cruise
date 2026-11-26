@@ -67,6 +67,32 @@ pub enum Correction {
     Resume(AttemptCorrection),
     /// A task whose requirement the integrated tip may already satisfy.
     Evidence(EvidenceRequest),
+    /// Advance the same GitHub target branch after a proven unpublished rejection.
+    Retarget(RetargetPreview),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetargetPreview {
+    pub repository: String,
+    pub target_ref: String,
+    pub old_base: String,
+    pub new_base: String,
+    pub proposal_revision: u64,
+    pub publication_rejection: String,
+    pub publication_digest: String,
+    pub contract_digest: String,
+    pub github_user_id: u64,
+    pub commits: String,
+    pub files: String,
+    pub merge_tree: Option<String>,
+    pub conflict: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetargetIntegration {
+    pub revision: u64,
+    pub intent: crate::manager_git::IntegrationIntent,
+    pub applied: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -307,11 +333,14 @@ pub struct GoalExecution {
     /// Immutable audit trail of explicitly approved corrections, in approval order.
     #[serde(default)]
     pub corrective_approvals: Vec<CorrectivePreview>,
-    /// Audit trail of unapproved previews discarded by an explicit verification retry.
+    /// Audit trail of unapproved previews discarded by retry or superseded by a retarget.
     #[serde(default)]
     pub corrective_discarded: Vec<CorrectivePreview>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_runs: Vec<EvidenceRun>,
+    /// Approved merge intent; the base changes only once the Goal ref is adopted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retarget: Option<RetargetIntegration>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -499,7 +528,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     }
     hex
 }
-fn hex_digest(bytes: &[u8]) -> String {
+pub(crate) fn hex_digest(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 fn record_path(repo: &Path) -> Result<PathBuf> {
@@ -523,6 +552,16 @@ impl Goal {
     /// Number of approved contract amendments. Revision 0 is the original proposal.
     pub(crate) fn contract_revision(&self) -> u64 {
         self.amendments().count() as u64
+    }
+
+    pub(crate) fn effective_base(&self) -> &str {
+        self.execution
+            .retarget
+            .as_ref()
+            .filter(|run| run.applied)
+            .map_or(self.proposal.target_sha.as_str(), |run| {
+                run.intent.child_result.as_str()
+            })
     }
 
     /// Text of one criterion after the first `revision` approved amendments. The proposal
@@ -1087,6 +1126,12 @@ fn stage_preview(goal: &mut Goal, tip: &str, correction: Correction) -> Result<C
         contract_revision: goal.contract_revision(),
         correction,
     };
+    if let Some(previous) = goal.execution.corrective_preview.take()
+        && (matches!(preview.correction, Correction::Retarget(_))
+            || matches!(previous.correction, Correction::Retarget(_)))
+    {
+        goal.execution.corrective_discarded.push(previous);
+    }
     goal.execution.corrective_preview = Some(preview.clone());
     Ok(preview)
 }
@@ -1150,6 +1195,9 @@ pub(crate) fn preview_correction(
 ) -> Result<CorrectivePreview> {
     update_goal(cwd, goal_id, |goal| {
         reviewed_state_unchanged(goal, expected_tip, contract_revision)?;
+        if let Correction::Retarget(reviewed) = &correction {
+            crate::manager_publication::retarget::validate_candidate(goal, reviewed)?;
+        }
         stage_preview(goal, expected_tip, correction)
     })
 }

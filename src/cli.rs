@@ -247,7 +247,7 @@ pub struct ManagerCorrectiveArgs {
     /// Goal ID from `cruise manager status`.
     pub goal: String,
     /// New task ID for corrective work, or the existing task for --resume and --evidence.
-    #[arg(required_unless_present = "amend")]
+    #[arg(required_unless_present_any = ["amend", "retarget"])]
     pub task: Option<String>,
     /// Instructions for the task or for --resume. Read from the terminal or piped stdin when omitted.
     #[arg(long, value_name = "TEXT")]
@@ -255,6 +255,9 @@ pub struct ManagerCorrectiveArgs {
     /// Amend criterion or task wording with the JSON edits in FILE. The original proposal is kept.
     #[arg(long, value_name = "FILE", conflicts_with_all = ["task", "instructions", "resume", "evidence"])]
     pub amend: Option<std::path::PathBuf>,
+    /// Preview a fast-forward of the same remote base after a definite GitHub title rejection.
+    #[arg(long, conflicts_with_all = ["task", "instructions", "amend", "resume", "evidence"])]
+    pub retarget: bool,
     /// Resume TASK's failed attempt in its own worktree with the instructions.
     #[arg(long, conflicts_with = "evidence")]
     pub resume: bool,

@@ -1522,3 +1522,66 @@ async fn manager_page_reviews_and_approves_a_contract_amendment() {
     );
     assert_eq!(stored.status, GoalStatus::Blocked);
 }
+
+#[tokio::test]
+async fn manager_page_displays_pinned_retarget_and_hides_conflicting_approval() {
+    let harness = harness();
+    let _data = isolate_records(&harness);
+    let repo = repository(&harness);
+    let blocked = blocked_verification(&repo);
+    let key = key(&repo);
+    for conflict in [None, Some("CONFLICT in src/lib.rs")] {
+        manager::update_goal(&repo, &blocked.id, |goal| {
+            goal.proposal.objective = "Long objective ".repeat(20);
+            let rejection = r#"PR create outcome uncertain (Err("gh failed: GraphQL: Title is too long (maximum is 256 characters) (createPullRequest)"), lookup Ok(None)). Human resolution required"#;
+            goal.reason = Some(rejection.into());
+            let mut publication = serde_json::to_value(&goal.execution.publication)?;
+            publication["phase"] = serde_json::json!("CreateIntent");
+            goal.execution.publication = serde_json::from_value(publication)?;
+            goal.execution.corrective_preview = Some(manager::CorrectivePreview {
+                id: "base-advance".into(),
+                revision: 7,
+                goal_id: goal.id.clone(),
+                integrated_tip: "verified-tip".into(),
+                contract_revision: 2,
+                correction: manager::Correction::Retarget(manager::RetargetPreview {
+                    repository: "github.com/example/project".into(),
+                    target_ref: "refs/heads/main".into(),
+                    old_base: "previous-base".into(),
+                    new_base: "pinned-base".into(),
+                    proposal_revision: 1,
+                    publication_rejection: rejection.into(),
+                    publication_digest: "verification-digest".into(),
+                    contract_digest: "contract-digest".into(),
+                    github_user_id: 1,
+                    commits: "a1b2c3 Advance target".into(),
+                    files: "M src/lib.rs".into(),
+                    merge_tree: conflict.is_none().then(|| "reviewed-tree".into()),
+                    conflict: conflict.map(str::to_owned),
+                }),
+            });
+            Ok(())
+        })
+        .unwrap_or_else(|e| panic!("seed retarget preview: {e}"));
+        let (status, _, html) = get(&harness, &format!("/manager/{key}"), &[]).await;
+        assert_eq!(status, StatusCode::OK, "{html}");
+        for expected in [
+            "github.com/example/project",
+            "refs/heads/main",
+            "verified-tip",
+            "previous-base",
+            "pinned-base",
+            "Contract revision: 2",
+            "verification-digest",
+            "a1b2c3 Advance target",
+            "M src/lib.rs",
+            conflict.unwrap_or("Merge conflicts: none"),
+        ] {
+            assert!(html.contains(expected), "missing {expected:?}: {html}");
+        }
+        assert_eq!(
+            html.contains("manager-approve-corrective-base-advance"),
+            conflict.is_none()
+        );
+    }
+}
