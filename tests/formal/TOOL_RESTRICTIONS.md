@@ -23,6 +23,8 @@ The `effect` bit denotes authorization to dispatch through an **active** enforce
 
 Cucumber scenarios are in `tests/features/tool_restrictions.feature`, definitions in `tests/tool_restrictions_bdd.rs`. They invoke real production policy APIs and the shipped CLI gate, asserting policy/MCP outputs and actual process status/stderr. No SDK account or model response is needed. The runner rejects skipped/undefined/pending steps and assertions. Cucumber 0.23 has no separate pending-step status: unimplemented steps are skipped, and `fail_on_skipped()` makes them failures. Separate executable negative controls verify undefined steps, real assertion failures, malformed feature syntax and an empty filtered suite all fail without retry. This is production-connected contract testing, not a claim to exercise a live hosted model.
 
+[`tool_restrictions_stdin.qnt`](tool_restrictions_stdin.qnt) models a separate BDD harness contract: the write and child exit may race, but only fixtures declared to bypass stdin may tolerate `BrokenPipe`. The existing CI job typechecks the model, runs its eight schedule and error tests, and verifies `safety` to four transitions. The production BDD also forces child-first order in all four early-exit cases; a wrong gate result still fails the output assertion.
+
 ## Reproducible execution and pins
 
 From the repository root, with Node **26.13.1** on PATH and Rust **1.99.1** installed:

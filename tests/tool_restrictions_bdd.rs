@@ -3,8 +3,9 @@
     clippy::unwrap_used,
     reason = "BDD assertions and isolated child processes"
 )]
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use cruise::config::{McpServers, PermissionMode};
 use cruise::tool_policy::{RuleSource, ToolPolicy, ToolRestriction};
@@ -135,7 +136,20 @@ fn mcp(w: &mut PolicyWorld, expected: String) {
     }
     assert_eq!(servers, original);
 }
-fn gate(w: &mut PolicyWorld, tool: &str, policy: Option<String>, payload: &str) {
+#[derive(Clone, Copy)]
+enum GateInput {
+    Required,
+    MayExitEarly,
+}
+
+fn gate(
+    w: &mut PolicyWorld,
+    tool: &str,
+    policy: Option<String>,
+    payload: &str,
+    input: GateInput,
+    wait_before_write: bool,
+) {
     // The hook must not see developer credentials, telemetry or repository state.
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
@@ -156,13 +170,39 @@ fn gate(w: &mut PolicyWorld, tool: &str, policy: Option<String>, payload: &str) 
         command.env("CRUISE_JCODE_SHELL_DENY", policy);
     }
     let mut child = command.spawn().unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(payload.as_bytes())
-        .unwrap();
-    w.output = Some(child.wait_with_output().unwrap());
+    let mut stdin = child.stdin.take().unwrap();
+    let may_exit_early = matches!(input, GateInput::MayExitEarly);
+    if wait_before_write {
+        // Keep the writer open; bound the wait in case the hook starts reading stdin.
+        assert!(
+            may_exit_early,
+            "cannot force exit for an input-reading fixture"
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                drop(stdin);
+                let _ = child.kill();
+                let output = child.wait_with_output().unwrap();
+                panic!("gate did not exit before stdin was written: {output:?}");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    let write = stdin.write_all(payload.as_bytes());
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    let broken_pipe = write.as_ref().err().map(std::io::Error::kind) == Some(ErrorKind::BrokenPipe);
+    if wait_before_write {
+        assert!(
+            broken_pipe,
+            "expected BrokenPipe after child exit: {write:?}"
+        );
+    }
+    if !(may_exit_early && broken_pipe) {
+        write.unwrap();
+    }
+    w.output = Some(output);
 }
 #[when(expr = "the real bash gate inspects {string}")]
 #[expect(
@@ -175,6 +215,8 @@ fn inspect(w: &mut PolicyWorld, script: String) {
         "bash",
         Some(serde_json::to_string(&w.policy.shell_rules).unwrap()),
         &serde_json::json!({"command":script}).to_string(),
+        GateInput::Required,
+        false,
     );
 }
 #[when(expr = "the real gate receives malformed case {word}")]
@@ -183,22 +225,38 @@ fn inspect(w: &mut PolicyWorld, script: String) {
     reason = "Cucumber captures owned strings"
 )]
 fn malformed(w: &mut PolicyWorld, case: String) {
+    malformed_gate(w, &case, false);
+}
+
+#[when(expr = "the real gate exits before stdin is written for malformed case {word}")]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Cucumber captures owned strings"
+)]
+fn malformed_exit_first(w: &mut PolicyWorld, case: String) {
+    malformed_gate(w, &case, true);
+}
+
+fn malformed_gate(w: &mut PolicyWorld, case: &str, wait_before_write: bool) {
+    use GateInput::{MayExitEarly, Required};
+
     let valid = serde_json::to_string(&w.policy.shell_rules).unwrap();
-    let (tool, policy, payload) = match case.as_str() {
-        "policy-json" => ("bash", Some("{".to_owned()), "{}"),
+    let (tool, policy, payload, input) = match case {
+        "policy-json" => ("bash", Some("{".to_owned()), "{}", MayExitEarly),
         "policy-prefix" => (
             "bash",
             Some(r#"[{"prefix":"git;push","source":"AllowCommit"}]"#.to_owned()),
             "{}",
+            MayExitEarly,
         ),
-        "input-json" => ("bash", Some(valid), "{"),
-        "missing-command" => ("bash", Some(valid), "{}"),
-        "nonstring-command" => ("bash", Some(valid), r#"{"command":42}"#),
-        "nonbash" => ("read", Some("{".to_owned()), "{"),
-        "absent-policy" => ("bash", None, "{"),
+        "input-json" => ("bash", Some(valid), "{", Required),
+        "missing-command" => ("bash", Some(valid), "{}", Required),
+        "nonstring-command" => ("bash", Some(valid), r#"{"command":42}"#, Required),
+        "nonbash" => ("read", Some("{".to_owned()), "{", MayExitEarly),
+        "absent-policy" => ("bash", None, "{", MayExitEarly),
         _ => panic!("unknown malformed fixture {case}"),
     };
-    gate(w, tool, policy, payload);
+    gate(w, tool, policy, payload, input, wait_before_write);
 }
 #[then(expr = "the gate exits {int} with diagnostic {string}")]
 #[expect(

@@ -11,6 +11,7 @@ fs.mkdirSync(output, { recursive: true });
 const cases = [
   ['undefined', 'Feature: Undefined control\n  Scenario: Undefined steps must fail\n    Then this deliberately undefined tool restrictions step\n', 'this deliberately undefined tool restrictions step', '1 step failed'],
   ['assertion', 'Feature: Assertion control\n  Scenario: Real policy assertion must fail\n    Given workflow restrictions "none" and step restrictions "none"\n    When the public policy is computed with permission full and allow_commit true\n    Then the policy has 99 shell rules\n', 'the policy has 99 shell rules', '1 step failed'],
+  ['early-exit-output', 'Feature: Early exit output control\n  Scenario: A tolerated write error must not hide a wrong hook result\n    When the real gate exits before stdin is written for malformed case nonbash\n    Then the gate exits 2 with diagnostic "none"\n', 'the gate exits 2 with diagnostic "none"', 'left: Some(0)'],
   ['parse', 'not a Gherkin feature\n', 'parsing error', 'parsing error'],
   ['empty', null, 'no tool restriction scenarios executed', 'no tool restriction scenarios executed'],
 ];

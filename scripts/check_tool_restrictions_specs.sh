@@ -40,6 +40,10 @@ run_check quint-typecheck "$Q" typecheck "$MODEL"
 run_check quint-test "$Q" test "$MODEL" --backend typescript --seed 20261025 --out-itf "$RUN/test_{test}_{seq}.itf.json"
 run_check quint-simulation "$Q" run --seed 20261025 --max-samples 1000 --max-steps 4 --invariant safety --backend typescript --out-itf "$RUN/simulation_{seq}.itf.json" "$MODEL"
 run_check quint-verify node scripts/formal/verify_quint.cjs "$Q" "$ROOT/$MODEL" tool_restrictions 4 "$RUN/counterexample.itf.json"
+STDIN_MODEL=tests/formal/tool_restrictions_stdin.qnt
+run_check quint-stdin-typecheck "$Q" typecheck "$STDIN_MODEL"
+run_check quint-stdin-test "$Q" test "$STDIN_MODEL" --backend typescript --seed 20261126 --out-itf "$RUN/stdin_test_{test}_{seq}.itf.json"
+run_check quint-stdin-verify node scripts/formal/verify_quint.cjs "$Q" "$ROOT/$STDIN_MODEL" tool_restrictions_stdin 4 "$RUN/stdin-counterexample.itf.json"
 # Alloy 6.2.0 help exec has no --expect flag. Its supported syntax is expect
 # 0/1 on each model command, checked independently against the CLI receipt.
 run_check alloy java -jar target/formal-tools/alloy-6.2.0.jar exec --command '*' --solver sat4j --type json --output "$RUN/alloy" tests/formal/tool_restrictions.als
