@@ -10,7 +10,7 @@ use crate::error::Result;
 use crate::manager::{
     self, Correction, CorrectivePreview, Goal, GoalStatus, RetargetIntegration, RetargetPreview,
 };
-use crate::manager_coordinator::validate_execution_contract;
+use crate::manager_coordinator::{validate_execution_contract, validate_task_attempts};
 use crate::manager_forge::{self, PullRequest};
 use crate::manager_git::{self, IntegrationObservation};
 use std::path::Path;
@@ -32,25 +32,29 @@ fn contract_digest(goal: &Goal) -> Result<String> {
 }
 
 fn require_integrated_tasks(goal: &Goal) -> Result<()> {
+    validate_task_attempts(goal)?;
     if goal.proposal.tasks.iter().any(|task| {
-        !goal.execution.attempts.iter().any(|attempt| {
-            attempt.task_id == task.id
-                && attempt.integrated
-                && attempt
-                    .result_sha
-                    .as_deref()
-                    .is_some_and(|sha| !sha.is_empty())
-        })
+        goal.latest_attempt(&task.id)
+            .is_none_or(|attempt| !attempt.integrated || attempt.correction_pending.is_some())
     }) || goal.execution.attempts.iter().any(|attempt| {
         attempt.resume_pending
             || attempt.resume_starting
+            || attempt.launch_started == Some(false)
+            // A finalized, superseded result is history; an unobserved effect is not.
             || (!attempt.integrated
-                && (attempt.finalization_intent.is_some() || attempt.integration_intent.is_some()))
+                && (attempt.integration_intent.is_some()
+                    || (attempt.finalization_intent.is_some()
+                        && attempt.result_sha.as_deref().is_none_or(str::is_empty))))
     }) || goal
         .execution
         .evidence_runs
         .iter()
         .any(|run| run.outcome.is_none())
+        || goal
+            .execution
+            .corrective_preview
+            .as_ref()
+            .is_some_and(|preview| !matches!(preview.correction, Correction::Retarget(_)))
     {
         return Err(error(
             "Retarget requires all tasks integrated and no unresolved work",
