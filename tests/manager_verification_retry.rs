@@ -291,10 +291,17 @@ fi
             .ok_or_else(|| format!("missing goal {id}").into())
     }
 
-    #[tokio::test]
-    async fn github_title_limit_and_explicit_reconciliation() -> Result<()> {
-        let root = TempDir::new()?;
-        let home = root.path();
+    const ORIGIN: &str = "https://github.com/example/project.git";
+
+    struct LocalGit {
+        repo: std::path::PathBuf,
+        remote: std::path::PathBuf,
+        base: String,
+        tip: String,
+        worktree: std::path::PathBuf,
+    }
+
+    fn setup_git(home: &Path) -> Result<LocalGit> {
         let repo = home.join("repo");
         fs::create_dir(&repo)?;
         git(&repo, &["init", "-q"])?;
@@ -302,8 +309,7 @@ fi
         git(&repo, &["init", "-q", "--bare", &remote.to_string_lossy()])?;
         git(&repo, &["config", "user.name", "Test"])?;
         git(&repo, &["config", "user.email", "test@example.test"])?;
-        let origin = "https://github.com/example/project.git";
-        git(&repo, &["remote", "add", "origin", origin])?;
+        git(&repo, &["remote", "add", "origin", ORIGIN])?;
         fs::write(repo.join("file"), "base\n")?;
         git(&repo, &["add", "file"])?;
         git(&repo, &["commit", "-qm", "base"])?;
@@ -333,6 +339,28 @@ fi
                 &format!("{tip}:refs/heads/moved"),
             ],
         )?;
+        Ok(LocalGit {
+            repo,
+            remote,
+            base,
+            tip,
+            worktree,
+        })
+    }
+
+    fn seed_goals(
+        home: &Path,
+        git_repo: &LocalGit,
+        titles: &[String; 3],
+    ) -> Result<(std::path::PathBuf, Value)> {
+        let LocalGit {
+            repo,
+            remote,
+            base,
+            tip,
+            worktree,
+        } = git_repo;
+        let manager = home.join("data/cruise/manager");
         let anchor = repo.canonicalize()?;
         let common = repo.join(".git").canonicalize()?;
         let workflow: cruise::config::WorkflowConfig = serde_json::from_value(json!({"steps":{}}))?;
@@ -342,9 +370,7 @@ fi
             "cancelled":false,"state_error":null,"stdout_log":manager.join("stdout"),"stderr_log":manager.join("stderr")}]);
         fs::write(manager.join("stdout"), "")?;
         fs::write(manager.join("stderr"), "")?;
-        let plain = "\u{5883}".repeat(256);
-        let ascii = "a".repeat(300);
-        let unicode = "\u{1f980}\u{5883}".repeat(150);
+        let [plain, ascii, unicode] = titles;
         let mut goals = Vec::new();
         for (index, id) in [
             "plain",
@@ -367,19 +393,19 @@ fi
             let branch = format!("cruise/goal/{id}");
             let target = if id == "moved-base" { "moved" } else { "main" };
             let objective = match id {
-                "plain" => &plain,
-                "ascii" => &ascii,
-                _ => &unicode,
+                "plain" => plain,
+                "ascii" => ascii,
+                _ => unicode,
             };
             let reference = format!("refs/heads/{branch}");
-            git(&repo, &["update-ref", &reference, &tip])?;
-            let remote_tip = if id == "moved-head" { &base } else { &tip };
-            git(&remote, &["update-ref", &reference, remote_tip])?;
+            git(repo, &["update-ref", &reference, tip])?;
+            let remote_tip = if id == "moved-head" { base } else { tip };
+            git(remote, &["update-ref", &reference, remote_tip])?;
             let proposal = json!({"id":"p","revision":1,"objective":objective,"target_branch":target,"target_sha":base,
                 "criteria":[{"id":"c","description":"unchanged contract"}],
                 "checks":[{"id":"check","criterion_ids":["c"],"argv":argv}],
                 "tasks":[{"id":"task","instructions":"work","dependencies":[]}],"workflow":"builtin:tdd",
-                "contract":{"anchor":anchor,"origin":origin,"forge_kind":"GitHub","forge_host":"github.com","forge_repository":"example/project","workflow":workflow}});
+                "contract":{"anchor":anchor,"origin":ORIGIN,"forge_kind":"GitHub","forge_host":"github.com","forge_repository":"example/project","workflow":workflow}});
             let (status, phase, reason) = if matches!(
                 id,
                 "plain" | "ascii" | "unicode" | "rejected"
@@ -399,14 +425,14 @@ fi
                 checks.clone()
             };
             goals.push(json!({"id":id,"proposal":proposal,"status":status,"reason":reason,
-                "execution":{"anchor":anchor,"origin":origin,"workflow":workflow,"integrated_tip":tip,
+                "execution":{"anchor":anchor,"origin":ORIGIN,"workflow":workflow,"integrated_tip":tip,
                 "attempts":[{"task_id":"task","attempt":1,"session_id":"s","base_sha":base,"launch_started":true,"result_sha":tip,"integrated":true}],
                 "publication":{"tip":tip,"worktree":worktree,"branch":branch,"phase":phase,"checks":publication_checks,
                 "pending_check":null,"request":null,"forge_kind":"GitHub","forge_host":"github.com","forge_repository":"example/project"}}}));
             let number = index + 1;
             let pr = json!([{"number":number,"html_url":format!("https://github.com/example/project/pull/{number}"),
                 "state":"closed","merged_at":"2026-11-20T00:00:00Z",
-                "head":{"ref":branch,"sha":if id == "wrong-head" {&base} else {&tip},"repo":{"full_name":"example/project"}},
+                "head":{"ref":branch,"sha":if id == "wrong-head" {base} else {tip},"repo":{"full_name":"example/project"}},
                 "base":{"ref":if id == "wrong-base" {"other"} else {target},"repo":{"full_name":"example/project"}}}]);
             let name = if matches!(id, "existing" | "wrong-base" | "wrong-head") {
                 "listed"
@@ -420,6 +446,20 @@ fi
             &record,
             serde_json::to_vec(&json!({"repository":common,"transcript":[],"goals":goals}))?,
         )?;
+        Ok((record, checks))
+    }
+
+    #[tokio::test]
+    async fn github_title_limit_and_explicit_reconciliation() -> Result<()> {
+        let root = TempDir::new()?;
+        let home = root.path();
+        let git_repo = setup_git(home)?;
+        let titles = [
+            "\u{5883}".repeat(256),
+            "a".repeat(300),
+            "\u{1f980}\u{5883}".repeat(150),
+        ];
+        let (record, checks) = seed_goals(home, &git_repo, &titles)?;
         forge_fixtures(home)?;
         let (_stop, _instance, _client) = start_daemon(home)?;
         for (id, status) in [
@@ -438,31 +478,35 @@ fi
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
         }
+        assert_retries(home, &git_repo.repo, &record, &checks)?;
+        assert_titles(home, &record, &titles)
+    }
 
-        let retry = |id| command_at(home, &repo, &["manager", "retry", id]);
+    fn assert_retries(home: &Path, repo: &Path, record: &Path, checks: &Value) -> Result<()> {
+        let retry = |id| command_at(home, repo, &["manager", "retry", id]);
         let out = retry("timeout")?;
         assert!(
             out.status.success(),
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let timed_out = goal_in(&record, "timeout")?;
+        let timed_out = goal_in(record, "timeout")?;
         assert!(timed_out["reason"].as_str().is_some_and(|reason| {
             reason.starts_with("PR create outcome uncertain")
                 && reason.contains("request timed out")
         }));
         assert!(
-            goal_in(&record, "rejected")?["reason"]
+            goal_in(record, "rejected")?["reason"]
                 .as_str()
                 .is_some_and(|reason| reason.starts_with("GitHub rejected the submitted PR title"))
         );
         let refuses = |id| -> Result<()> {
-            let before = goal_in(&record, id)?;
+            let before = goal_in(record, id)?;
             let marker = home.join(format!("attempt-{id}"));
             let attempts = fs::read(&marker).ok();
             let out = retry(id)?;
             assert!(!out.status.success(), "unsafe retry accepted for {id}");
-            assert_eq!(goal_in(&record, id)?, before);
+            assert_eq!(goal_in(record, id)?, before);
             assert_eq!(fs::read(marker).ok(), attempts);
             Ok(())
         };
@@ -491,18 +535,29 @@ fi
                 "{id}: {}",
                 String::from_utf8_lossy(&out.stderr)
             );
-            assert_eq!(goal_in(&record, id)?["status"], "completed");
+            assert_eq!(goal_in(record, id)?["status"], "completed");
             assert_eq!(
-                goal_in(&record, id)?["execution"]["publication"]["checks"],
+                &goal_in(record, id)?["execution"]["publication"]["checks"],
                 checks
             );
         }
         assert!(!home.join("attempt-existing").exists());
+        for id in ["timeout", "rejected"] {
+            assert_eq!(
+                fs::read_to_string(home.join(format!("attempt-{id}")))?,
+                "create\n"
+            );
+        }
+        Ok(())
+    }
+
+    fn assert_titles(home: &Path, record: &Path, titles: &[String; 3]) -> Result<()> {
+        let [plain, ascii, unicode] = titles;
         for (id, original) in [
-            ("plain", &plain),
-            ("ascii", &ascii),
-            ("unicode", &unicode),
-            ("legacy", &unicode),
+            ("plain", plain),
+            ("ascii", ascii),
+            ("unicode", unicode),
+            ("legacy", unicode),
         ] {
             assert_eq!(
                 fs::read_to_string(home.join(format!("attempt-{id}")))?,
@@ -522,13 +577,7 @@ fi
                     format!("{original_body}\n\n## Goal objective\n\n{original}")
                 );
             }
-            assert_eq!(goal_in(&record, id)?["proposal"]["objective"], *original);
-        }
-        for id in ["timeout", "rejected"] {
-            assert_eq!(
-                fs::read_to_string(home.join(format!("attempt-{id}")))?,
-                "create\n"
-            );
+            assert_eq!(goal_in(record, id)?["proposal"]["objective"], *original);
         }
         Ok(())
     }
