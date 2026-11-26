@@ -1,0 +1,15 @@
+> Where should cruise execute? Use current branch
+-> current branch: /private/var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/verify-cruise.l5Eno5/repo-product
+Quint PNG: /var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/cruise-quint-8a1669ba-424e-4b6c-857b-41a7eb321461/quint.png
+Open this file manually while the menu is active.
+
++- Plan -------------------------------------------------------------------------------------------+
+| Review the Quint state transitions before implementation.                                        |
++--------------------------------------------------------------------------------------------------+
+> Select an option Approve Quint model
+
+> implement
+  v 0.0s
+
+v workflow complete (1 run, 0 skipped, 0 failed) [0.0s]
+Error: Formal maintenance blocked: it may edit only `tests/formal/counter.qnt` and .cruise/formal-coverage.toml, but changed `src/counter.sh`

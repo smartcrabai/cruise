@@ -1,0 +1,1 @@
+- `tests/formal/counter.qnt`: updated; sync `f23a6c3e1c9d00810716552f49a40007eded3012`

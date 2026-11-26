@@ -1,0 +1,19 @@
+{
+  "argv": [
+    "cruise",
+    "run",
+    "20261126182721112_ef3fab8f765442158964a3ae3f433172",
+    "-f",
+    "formal_methods"
+  ],
+  "cols": 120,
+  "completed": true,
+  "error": null,
+  "exit_code": 0,
+  "rows": 70,
+  "snapshots": [
+    "01-review",
+    "02-updated-review",
+    "03-final"
+  ]
+}

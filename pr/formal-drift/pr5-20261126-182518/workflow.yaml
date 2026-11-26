@@ -1,0 +1,10 @@
+# One implementation step that changes covered code; the stand-in agent is agent.sh.
+command: [sh, ../agent.sh]
+create_pr: false
+flags:
+  formal_methods:
+    description: Approve a Quint model before implementation and verify it before publication
+    quint_review: true
+steps:
+  implement:
+    command: "sh ../implement.sh"

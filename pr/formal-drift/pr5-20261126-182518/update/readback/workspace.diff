@@ -1,0 +1,43 @@
+diff --git a/.cruise/formal-coverage.toml b/.cruise/formal-coverage.toml
+index 2579fed..d51d355 100644
+--- a/.cruise/formal-coverage.toml
++++ b/.cruise/formal-coverage.toml
+@@ -1,4 +1,4 @@
+ [[model]]
+ path = "tests/formal/counter.qnt"
+ covers = ["src/counter.sh"]
+-sync = "e12e267b3d1347b149e2a943e515fc45e38db161"
++sync = "f23a6c3e1c9d00810716552f49a40007eded3012"
+diff --git a/src/counter.sh b/src/counter.sh
+index e9e7c06..139428c 100644
+--- a/src/counter.sh
++++ b/src/counter.sh
+@@ -1,5 +1,5 @@
+ #!/bin/sh
+ # Increment the counter file, refusing to pass the limit.
+ n=$(cat count 2>/dev/null || echo 0)
+-[ "$n" -lt 3 ] || { echo "limit reached" >&2; exit 1; }
++[ "$n" -lt 5 ] || { echo "limit reached" >&2; exit 1; }
+ echo $((n + 1)) > count
+diff --git a/tests/formal/counter.qnt b/tests/formal/counter.qnt
+index 39c7ddb..72e9bac 100644
+--- a/tests/formal/counter.qnt
++++ b/tests/formal/counter.qnt
+@@ -2,7 +2,7 @@
+ module counter {
+   var n: int
+   var diagram: { state: str, via: str }
+-  pure val limit = 3
++  pure val limit = 5
+   action init = all { n' = 0, diagram' = { state: "Zero", via: "start" } }
+   action inc = all {
+     n' = if (n < limit) n + 1 else n,
+@@ -11,6 +11,6 @@ module counter {
+   action step = inc
+   val safety = n <= limit
+   run incTest = init.then(inc).expect(n == 1 and safety)
+-  run limitTest = init.then(inc).then(inc).then(inc).expect(n == limit and safety)
+-  run refuseTest = init.then(inc).then(inc).then(inc).then(inc).expect(n == limit and safety)
++  run limitTest = init.then(inc).then(inc).then(inc).then(inc).then(inc).expect(n == limit and safety)
++  run refuseTest = init.then(inc).then(inc).then(inc).then(inc).then(inc).then(inc).expect(n == limit and safety)
+ }

@@ -1,0 +1,13 @@
+> Where should cruise execute? Use current branch
+-> current branch: /private/var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/verify-cruise.l5Eno5/repo-update
+Quint PNG: /var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/cruise-quint-76c78705-92bf-491f-bd18-42d0188f061e/quint.png
+Open this file manually while the menu is active.
+
++- Plan -------------------------------------------------------------------------------------------+
+| Review the Quint state transitions before implementation.                                        |
++--------------------------------------------------------------------------------------------------+
+? Select an option  
+> Approve Quint model
+  Reject and stop
+  Request changes
+[↑↓ to move, enter to select, type to filter]
