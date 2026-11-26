@@ -15,7 +15,7 @@ root=$(cd "$root" && pwd -P)
 mkdir -p "$root/home/config/cruise" "$root/home/data" "$root/home/state" "$root/repo"
 # Only these variables reach Cruise; in.sh starts from an empty environment.
 cat >"$root/env" <<EOF
-PATH=$repo_root/target/debug:$repo_root/target/debug/examples:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin:$node_dir
+PATH=$repo_root/target/debug:$repo_root/target/debug/examples:$node_dir:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin
 HOME=$root/home
 XDG_CONFIG_HOME=$root/home/config
 XDG_DATA_HOME=$root/home/data
