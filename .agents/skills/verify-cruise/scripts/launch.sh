@@ -8,12 +8,14 @@ cd "$repo_root"
 if [[ "${1:-}" != --no-build ]]; then
   cargo +1.99.1 build --locked --all-features --bin cruise --bin cruise-runtime --example verify_pty >&2
 fi
+# Node.js serves the daemon's Quint tools and the browser scripts; keep the caller's.
+node_dir=$(dirname "$(command -v node || echo /usr/bin/node)")
 root=$(mktemp -d "${TMPDIR:-/tmp}/verify-cruise.XXXXXX")
 root=$(cd "$root" && pwd -P)
 mkdir -p "$root/home/config/cruise" "$root/home/data" "$root/home/state" "$root/repo"
 # Only these variables reach Cruise; in.sh starts from an empty environment.
 cat >"$root/env" <<EOF
-PATH=$repo_root/target/debug:$repo_root/target/debug/examples:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin
+PATH=$repo_root/target/debug:$repo_root/target/debug/examples:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin:$node_dir
 HOME=$root/home
 XDG_CONFIG_HOME=$root/home/config
 XDG_DATA_HOME=$root/home/data

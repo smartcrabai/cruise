@@ -64,5 +64,6 @@ All in `scripts/`, executable, shown above: `launch.sh`, `in.sh`, `doctor.sh`, `
 - `cruise plan` on a TTY asks for an action and then for steps to skip; `Enter` on the second prompt approves with no skips. `cruise run` on a TTY first asks where to execute; choose `Use current branch` (`\e[B` then `\r`) to keep work in `ROOT/repo`.
 - Each drive is its own process; the daemon is shared within a run. Sessions accumulate, so select by ID or phase, not by position.
 - On some macOS hosts the bundled Chromium headless shell crashes (`Page crashed`, `BUS_ADRALN`) at widths of 768px and more, including the repository's own `tests/webui` desktop contracts. Set `VERIFY_CRUISE_BROWSER_CHANNEL=chrome` to use the installed Google Chrome with Playwright's isolated profile.
+- `formal_methods` runs need the pinned Quint tools under the run's data directory: `cp -R` an installed `quint-tools` (see `docs/en/configuration.md#quint-workflow-review`) to `$ROOT/home/data/cruise/quint-tools`. `launch.sh` puts the caller's Node.js on the run's `PATH`.
 - `launch.sh --no-build` reuses binaries as they are; Doctor catches source edits after launch, not before.
 - The CLI exits 0 when a workflow finishes; read `exit_code` in `result.json` and the session phase, not only the screen.
