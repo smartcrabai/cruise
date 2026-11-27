@@ -36,6 +36,7 @@
 
 ### Added
 
+- Let Manager messages attach images from the CLI or WebUI, retain them across restart, and pass verified copies only to the tasks named in an approved proposal. Review approvals in a non-blocking WebUI panel.
 - Keep repository Quint models in step with the code. With `formal_methods`, a run that changes code covered by `.cruise/formal-coverage.toml` checks each covered model before final verification: an agent classifies the changes and may edit only the model and the coverage file; an updated model must pass, fail on a scratch break, and get PNG approval; a code bug stops the run before the PR. Only `in sync` or approved models move their `sync` commit.
 - Add the contributor skill `.agents/skills/verify-cruise/`: it builds the checkout, starts an isolated daemon, drives `cruise` in a real PTY (`cargo run --example verify_pty`) and the WebUI in Chromium, and captures terminal screens and screenshots for four mapped features as PR evidence.
 - Opt into a single read-only second opinion after implementation in `builtin:tdd` with `-f advisor` (jcode only). Set `advisor_model` in the workflow or `default.yaml`, or override it with `CRUISE_ADVISOR_MODEL`. The normal model checks fresh advice and applies only confirmed defects within the approved plan, without a second review.

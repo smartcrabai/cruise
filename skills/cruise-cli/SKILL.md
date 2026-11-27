@@ -64,6 +64,7 @@ Run it inside a local Git checkout (`cruise manager` requires one); every subcom
 |---|---|
 | `cruise manager` / `status [--json]` | Show transcript, pending proposal (with revision), goals, and pending child prompts. Use `--json` to read Goal, task, and prompt IDs in scripts. |
 | `say [TEXT] [--no-wait]` | Discuss the goal. Without TEXT, reads a terminal prompt or piped stdin. Waits for the reply and exits non-zero if the turn does not complete; `--no-wait` returns the turn ID. Ctrl-C stops waiting only. |
+| `say [TEXT] --image FILE` / `say --retry-image-turn TURN` | Upload up to eight PNG/JPEG/GIF/WebP files totaling 1 MiB, or explicitly retry saved image input before its provider send started. Only the task shown in an approved proposal receives a verified copy. |
 | `propose [--no-wait]` | Generate a validated proposal preview from the conversation. The target branch must resolve to a local `origin` tracking ref (fetch first). A preview authorizes nothing. |
 | `approve [--revision N] [--yes]` | Print the proposal (tasks, checks, contract) and approve it. Terminal: type `approve` unless `--yes`. No terminal: **both** `--yes` and `--revision N` are required, and N must match the current preview. Creates one active Goal; the daemon schedules children asynchronously. |
 | `pause <GOAL>` / `resume <GOAL>` | Pause or restore Goal-scoped scheduling. |
@@ -79,6 +80,8 @@ Run it inside a local Git checkout (`cruise manager` requires one); every subcom
 | `corrective <GOAL> --amend FILE` | Preview a narrow wording amendment of criteria or task instructions. FILE is a JSON array such as `[{"criterion":"C1","replace":"old","with":"new"}]` (`"task"` for instructions, optional `"old_sha256"`). The proposal is never rewritten and checks cannot be amended. |
 | `corrective <GOAL> --retarget` | Preview a fast-forward of the same GitHub target ref after a definite legacy title rejection. Each task's latest attempt must be integrated; older finalized results superseded by that integration stay in the audit history. Requires the verified remote head and fresh authenticated PR absence across all states. Approval integrates the pinned base once and reruns every approved check before guarded publication. |
 | `approve-corrective <GOAL> [--revision N] [--yes]` | Approve that exact preview with the same confirmation and revision rules as `approve`. A changed preview, integrated tip, or contract needs fresh review. |
+
+The WebUI approval panel leaves the conversation and navigation usable. It still requires explicit confirmation of the displayed revision.
 
 Typical scripted flow (approval requires the user's explicit authorization — never self-approve on their behalf):
 

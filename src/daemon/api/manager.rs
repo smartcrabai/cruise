@@ -93,6 +93,11 @@ struct ActionRequest {
 pub(crate) enum Action {
     Message {
         text: String,
+        #[serde(default)]
+        images: Vec<crate::manager::images::Upload>,
+    },
+    RetryImageTurn {
+        turn_id: String,
     },
     Propose,
     PreviewCorrective {
@@ -170,7 +175,12 @@ pub(crate) fn dispatch_action(
     }
     let value =
         match action {
-            Action::Message { text } => serde_json::to_value(provider::message(cwd, text)?)?,
+            Action::Message { text, images } => {
+                serde_json::to_value(provider::message(cwd, text, images)?)?
+            }
+            Action::RetryImageTurn { turn_id } => {
+                serde_json::to_value(provider::retry_image_turn(cwd, &turn_id)?)?
+            }
             Action::Propose => serde_json::to_value(provider::propose(cwd)?)?,
             Action::PreviewCorrective {
                 goal_id,

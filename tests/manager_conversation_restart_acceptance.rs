@@ -16,8 +16,11 @@ use std::{
 use jcode_sdk::api::{
     API_VERSION_MAJOR, ApiEvent, ApiRequest, ClientFrame, ServerFrame, read_frame, write_frame,
 };
-
 use sha2::{Digest, Sha256};
+
+#[path = "support/manager_images.rs"]
+mod manager_images;
+
 const FAKE_JCODE: &str = "CRUISE_TEST_MANAGER_FAKE_JCODE";
 const VALID_PROPOSAL: &str = r#"{"objective":"Deliver goal","target_branch":"main","exclusions":[],"criteria":[{"id":"c","description":"Works"}],"checks":[{"id":"check","criterion_ids":["c"],"argv":["true"]}],"tasks":[{"id":"task","instructions":"Implement","dependencies":[]}]}"#;
 
@@ -821,6 +824,10 @@ async fn completed_goals_are_summarized_only_in_provider_context() {
 }
 
 fn send_fake_reply(socket: &mut UnixStream, session_id: &str, fixture: &str, proposal: bool) {
+    if proposal && let Some(draft) = manager_images::fake_proposal(fixture, VALID_PROPOSAL) {
+        send_fake_text(socket, session_id, &[&draft]);
+        return;
+    }
     let alternate = match fixture {
         "missing-branch" => {
             VALID_PROPOSAL.replace(r#""target_branch":"main""#, r#""target_branch":"""#)
@@ -841,6 +848,10 @@ fn send_fake_reply(socket: &mut UnixStream, session_id: &str, fixture: &str, pro
     } else {
         &["Discussed goal"]
     };
+    send_fake_text(socket, session_id, outputs);
+}
+
+fn send_fake_text(socket: &mut UnixStream, session_id: &str, outputs: &[&str]) {
     let events = std::iter::once(json!({"ev":"message_accepted","session_id":session_id}))
         .chain(outputs.iter().flat_map(|output| {
             [
@@ -927,6 +938,8 @@ fn manager_fake_jcode_runtime() {
                     context,
                 )
                 .unwrap_or_else(|error| panic!("save fake provider evidence: {error}"));
+            } else if fixture == "capture-image" {
+                manager_images::capture_image(release_path, &serialized);
             }
             let proposal = serialized.contains("Create a proposal for human review");
             send_fake_reply(&mut socket, session_id, &fixture, proposal);

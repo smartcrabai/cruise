@@ -876,7 +876,7 @@ const CORRECTION_HEADING: &str = "\n# Approved correction ";
 /// Plan of one attempt, derived only from the Goal record: the contract as amended when the
 /// attempt was reserved, then every correction approved for exactly this attempt. A
 /// correction also states the texts amended since, so the plan only ever grows.
-fn child_plan(goal: &Goal, attempt: &TaskAttempt) -> Result<String> {
+fn child_plan(goal: &Goal, attempt: &TaskAttempt, sessions: &Path) -> Result<String> {
     let mut contract = attempt.contract_revision;
     let mut plan = format!(
         "# Goal\n\n{}\n\n# Task\n\n{}\n\n# Acceptance criteria\n",
@@ -892,6 +892,13 @@ fn child_plan(goal: &Goal, attempt: &TaskAttempt) -> Result<String> {
         let _ = write!(plan, "\n- {exclusion}");
     }
     plan.push('\n');
+    let images = manager::images::child_images(goal, &attempt.task_id);
+    if !images.is_empty() {
+        let target = crate::attachments::attachments_dir(&sessions.join(&attempt.session_id));
+        let paths = manager::images::child_paths(&target, images)?;
+        plan = crate::attachments::format_input_with_attachments(&plan, &paths);
+        plan.push('\n');
+    }
     for revision in &attempt.corrections {
         let (approved, instructions) = match goal.approved(*revision) {
             Some(approved) => match &approved.correction {
@@ -989,7 +996,8 @@ pub(crate) fn validate_claimed_child(
                 && attempt.session_id == child.id
         })
         .ok_or_else(|| CruiseError::Other("Manager attempt is missing".into()))?;
-    let expected_plan = child_plan(goal, attempt)?;
+    let sessions = application.managed_session_store().sessions_dir();
+    let expected_plan = child_plan(goal, attempt, &sessions)?;
     let contract = goal
         .proposal
         .contract
@@ -1025,6 +1033,11 @@ pub(crate) fn validate_claimed_child(
             "Manager child settings differ from the approved contract".into(),
         ));
     }
+    manager::images::verify_child(
+        &snapshot.repository,
+        &crate::attachments::attachments_dir(&sessions.join(&child.id)),
+        manager::images::child_images(goal, &attempt.task_id),
+    )?;
     sync_child_plan(application, child, &expected_plan)
 }
 
@@ -1202,7 +1215,18 @@ fn claim_reserved_child(
     let runtime = application.runtime();
     let store = application.managed_session_store();
     let result = (|| {
-        let created = store.create_managed_child(child, &contract.workflow, plan)?;
+        let created =
+            store.create_managed_child(child, &contract.workflow, plan, |session_dir| {
+                let images = manager::images::child_images(goal, &attempt.task_id);
+                if !images.is_empty() {
+                    manager::images::copy(
+                        &manager::repository(cwd)?,
+                        &crate::attachments::attachments_dir(session_dir),
+                        images,
+                    )?;
+                }
+                Ok(())
+            })?;
         if created.managed_child.as_ref() != Some(&child_owner)
             || created.phase != crate::session::SessionPhase::Planned
             || application.session_plan(&created.id)? != plan
@@ -1439,7 +1463,11 @@ pub(crate) fn reserve_and_claim(
             contract_revision,
         )?;
     }
-    let plan = child_plan(goal, &attempt)?;
+    let plan = child_plan(
+        goal,
+        &attempt,
+        &application.managed_session_store().sessions_dir(),
+    )?;
     let child_owner = owner(goal, &attempt);
     let mut child = crate::session::SessionState::new(
         attempt.session_id.clone(),

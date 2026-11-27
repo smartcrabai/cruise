@@ -123,12 +123,24 @@
     }
   }
 
+  document.addEventListener("paste", (event) => {
+    if (!(event.target instanceof Element) || event.target.id !== "manager-message") return;
+    const input = event.target.closest("form")?.querySelector("#manager-images");
+    const pasted = [...(event.clipboardData?.files ?? [])].filter(file => /^image\/(png|jpeg|gif|webp)$/.test(file.type));
+    if (!(input instanceof HTMLInputElement) || pasted.length === 0) return;
+    const files = new DataTransfer();
+    for (const file of [...input.files, ...pasted]) files.items.add(file);
+    input.files = files.files;
+    if (!event.clipboardData.getData("text/plain")) event.preventDefault();
+  });
+
   const submittedManagerDrafts = new WeakMap();
   document.addEventListener("htmx:before:request", (event) => {
     const form = event.target;
     if (!(form instanceof HTMLFormElement) || !form.hasAttribute("data-manager-reset-composer")) return;
     const textarea = form.querySelector("textarea");
-    if (textarea) submittedManagerDrafts.set(event.detail.ctx, { textarea, value: textarea.value });
+    const input = form.querySelector("#manager-images");
+    if (textarea) submittedManagerDrafts.set(event.detail.ctx, { textarea, value: textarea.value, input, files: Array.from(input?.files ?? []) });
   });
   document.addEventListener("htmx:after:request", (event) => {
     const ctx = event.detail.ctx;
@@ -137,6 +149,10 @@
     submittedManagerDrafts.delete(ctx);
     if (ctx.response.raw.ok && submission.textarea.value === submission.value) {
       submission.textarea.value = "";
+      if (submission.input && submission.files.length === submission.input.files.length
+        && submission.files.every((file, index) => file === submission.input.files[index])) {
+        submission.input.value = "";
+      }
     }
   });
 
@@ -319,18 +335,27 @@
 
       const review = target.closest("[data-manager-review]");
       if (review) {
-        const source = document.getElementById(review.getAttribute("data-manager-review"));
+        const id = review.getAttribute("data-manager-review");
+        const source = document.getElementById(id);
         const host = document.getElementById("manager-review-host");
-        if (!(source instanceof HTMLTemplateElement) || !host || host.firstElementChild) return;
+        if (!(source instanceof HTMLTemplateElement) || !host || host.querySelector(".htmx-request")) return;
 
         // Keep the reviewed values outside the polling target until the user confirms.
-        host.append(source.content.cloneNode(true));
-        const modal = host.querySelector("dialog");
-        modal.addEventListener("close", () => modal.remove(), { once: true });
-        modal.querySelector("[data-manager-close]").addEventListener("click", () => modal.close());
-        modal.querySelector("[data-manager-confirm]").addEventListener("htmx:after:request", () => modal.close());
-        htmx.process(modal);
-        modal.showModal();
+        host.replaceChildren(source.content.cloneNode(true));
+        const panel = host.firstElementChild;
+        const cancel = panel.querySelector("[data-manager-close]");
+        const close = () => {
+          const restoreFocus = panel.contains(document.activeElement);
+          panel.remove();
+          if (restoreFocus) document.querySelector(`[data-manager-review="${CSS.escape(id)}"]`)?.focus();
+        };
+        cancel.addEventListener("click", close);
+        panel.addEventListener("keydown", (event) => {
+          if (event.key === "Escape") close();
+        });
+        panel.querySelector("[data-manager-confirm]").addEventListener("htmx:after:request", close);
+        htmx.process(panel);
+        cancel.focus();
         return;
       }
 

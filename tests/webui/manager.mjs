@@ -176,21 +176,28 @@ try {
   await screenshot('02-proposal');
 
   const review = page.getByRole('button', { name: /^(approve|approve proposal)$/i });
-  await review.click();
-  const dialog = page.getByRole('dialog');
-  await dialog.waitFor();
-  assert.match(await dialog.innerText(), new RegExp(objective));
-  assert.match(await dialog.innerText(), new RegExp(`revision\\W+${revision}\\b`, 'i'));
+  await review.press('Enter');
+  const reviewPanel = page.getByRole('region', { name: 'Review proposal' });
+  await reviewPanel.waitFor();
+  assert.match(await reviewPanel.innerText(), new RegExp(objective));
+  assert.match(await reviewPanel.innerText(), new RegExp(`revision\\W+${revision}\\b`, 'i'));
   assert.equal(approvalRequests.length, 0, 'opening review sends no approval');
   assert.deepEqual((await snapshot()).goals, [], 'opening review creates no Goal');
-  await screenshot('03-approve-dialog');
-  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
-  await dialog.waitFor({ state: 'hidden' });
+  const reviewDraft = page.locator('#manager-message');
+  await reviewDraft.click();
+  await reviewDraft.pressSequentially('Draft while reviewing');
+  await page.waitForResponse(`${base}${actionPath('sync')}`);
+  assert.equal(await reviewDraft.inputValue(), 'Draft while reviewing');
+  assert(await reviewPanel.isVisible(), 'the review stays open across polling while the conversation is usable');
+  await screenshot('03-approval-panel');
+  await reviewPanel.getByRole('button', { name: 'Cancel', exact: true }).press('Escape');
+  await reviewPanel.waitFor({ state: 'hidden' });
+  assert(await review.evaluate(el => el === document.activeElement), 'closing review returns keyboard focus');
   assert.equal(approvalRequests.length, 0, 'canceling review sends no approval');
   assert.deepEqual((await snapshot()).goals, [], 'canceling review creates no Goal');
   await review.click();
-  await dialog.waitFor();
-  const [approved] = await Promise.all([waitForAction('approve'), dialog.locator('button[type="submit"]').click()]);
+  await reviewPanel.waitFor();
+  const [approved] = await Promise.all([waitForAction('approve'), reviewPanel.locator('button[type="submit"]').click()]);
   assert(approved.ok(), `approval returned HTTP ${approved.status()}`);
   const approvalPayload = new URLSearchParams(approved.request().postData());
   assert.equal(approvalPayload.get('proposal_id'), proposalId);
@@ -273,6 +280,37 @@ try {
   assert.equal(acceptedWithEdit.status(), 202);
   await page.getByText('Another submitted turn', { exact: true }).waitFor();
   assert.equal(await composer.inputValue(), 'A newer edit');
+
+  await composer.fill('Reject an empty screenshot.');
+  const imageInput = page.locator('#manager-images');
+  await imageInput.setInputFiles({ name: 'empty.png', mimeType: 'image/png', buffer: Buffer.alloc(0) });
+  const [invalidImage] = await Promise.all([waitForAction('message'), messageForm.locator('button[type="submit"]').click()]);
+  assert.equal(invalidImage.status(), 400);
+  assert(!(await snapshot()).transcript.some(turn => turn.text === 'Reject an empty screenshot.'));
+  await imageInput.setInputFiles([]);
+
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgaPgPAAIDAYAkYfWXAAAAAElFTkSuQmCC', 'base64');
+  const imageMessage = 'Save this screenshot with the conversation.';
+  await composer.fill(imageMessage);
+  await composer.evaluate((input, pngBytes) => {
+    const data = new DataTransfer();
+    data.items.add(new File([new Uint8Array(pngBytes)], 'pasted.png', { type: 'image/png' }));
+    input.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
+  }, Array.from(png));
+  assert.equal(await page.locator('#manager-images').evaluate(input => input.files.length), 1);
+  const [imageAccepted] = await Promise.all([waitForAction('message'), messageForm.locator('button[type="submit"]').click()]);
+  assert.equal(imageAccepted.status(), 202);
+  const imageTurn = (await snapshot()).transcript.find(turn => turn.text === imageMessage);
+  assert.equal(imageTurn.images[0].sha256, createHash('sha256').update(png).digest('hex'));
+  const imageRoute = `${base}${actionPath(`images/${imageTurn.images[0].id}`)}`;
+  const renderedImage = page.locator(`#manager-turn-${imageTurn.id} img`);
+  await renderedImage.waitFor();
+  await page.waitForFunction(id => document.querySelector(`#manager-turn-${id} img`)?.naturalWidth === 1, imageTurn.id);
+  assert.deepEqual(await (await context.request.get(imageRoute)).body(), png);
+  await page.reload();
+  await renderedImage.waitFor();
+  await screenshot('07-manager-image');
+  console.log(`Manager image: ${png.length} bytes, same digest in record and authenticated preview after reload`);
 
   // Keep the linked worktree and persisted record, but remove access to the main checkout.
   await rename(repo, join(root, 'unavailable-main'));

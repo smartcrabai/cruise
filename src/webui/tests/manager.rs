@@ -1263,7 +1263,7 @@ async fn manager_conversation_actions_while_turn_in_flight_are_busy_without_appe
             .unwrap_or_else(|e| panic!("conversation runtime: {e}"));
         let accepted = {
             let _enter = runtime.enter();
-            crate::manager_provider::message(&cwd, "First turn".into())
+            crate::manager_provider::message(&cwd, "First turn".into(), Vec::new())
         };
         let _ = started.send(accepted);
         let _ = done.recv();

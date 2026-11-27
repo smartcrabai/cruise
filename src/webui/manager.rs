@@ -2,8 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-use axum::extract::{Form, Path as UrlPath, rejection::FormRejection};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{
+    Form, FromRequest as _, Multipart, Path as UrlPath, Request, rejection::FormRejection,
+};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Router};
@@ -29,9 +31,11 @@ pub(super) fn routes() -> Router<WebState> {
         .route("/manager", get(list))
         .route("/manager/{repo}", get(detail))
         .route("/webui/manager/open", post(open))
-        .route("/webui/manager/{repo}/sync", get(sync));
+        .route("/webui/manager/{repo}/sync", get(sync))
+        .route("/webui/manager/{repo}/images/{id}", get(image));
     [
         "message",
+        "retry-image-turn",
         "propose",
         "approve",
         "preview-corrective",
@@ -204,6 +208,35 @@ fn region_html(state: &WebState, key: &str, cwd: &Path) -> Result<String> {
     if let Some(revision) = snapshot["proposal"]["revision"].as_u64() {
         snapshot["proposal"]["revision"] = json!(revision.to_string());
     }
+    let mut review = snapshot["proposal"]["objective"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    if let Some(tasks) = snapshot["proposal"]["contract"]["task_images"].as_object() {
+        use std::fmt::Write as _;
+        for (task, images) in tasks {
+            if let Some(images) = images.as_array() {
+                for image in images {
+                    let _ = write!(
+                        review,
+                        "\n{task}: {} ({})",
+                        image["id"].as_str().unwrap_or_default(),
+                        image["sha256"].as_str().unwrap_or_default()
+                    );
+                }
+            }
+        }
+    }
+    snapshot["approval_objective"] = json!(review);
+    if let Some(turns) = snapshot["transcript"].as_array_mut() {
+        for turn in turns {
+            if turn["images"].is_null() {
+                turn["images"] = json!([]);
+            }
+            turn["can_retry_image"] =
+                json!(turn["image_started"] == false && turn["status"] == "interrupted");
+        }
+    }
     if let Some(goals) = snapshot["goals"].as_array_mut() {
         for goal in goals {
             goal_controls(goal)?;
@@ -372,6 +405,38 @@ async fn sync(UiState(state): UiState, UrlPath(key): UrlPath<String>) -> Respons
     .await
 }
 
+async fn image(
+    UiState(_state): UiState,
+    UrlPath((key, id)): UrlPath<(String, String)>,
+) -> Response {
+    blocking(move || {
+        let Some(repository) = repository(&key)? else {
+            return Ok(StatusCode::NOT_FOUND.into_response());
+        };
+        let snapshot = manager::snapshot_for_repository(repository)?;
+        let Some(image) = snapshot
+            .transcript
+            .iter()
+            .flat_map(|turn| &turn.images)
+            .find(|image| image.id == id)
+        else {
+            return Ok(StatusCode::NOT_FOUND.into_response());
+        };
+        let Ok((mime, bytes)) = image.read(&snapshot.repository) else {
+            return Ok(StatusCode::NOT_FOUND.into_response());
+        };
+        Ok((
+            [
+                (header::CONTENT_TYPE, mime),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            ],
+            bytes,
+        )
+            .into_response())
+    })
+    .await
+}
+
 fn inline_error(status: StatusCode, id: &str, message: &str) -> Response {
     (
         status,
@@ -387,12 +452,68 @@ fn action_error(status: StatusCode, message: &str) -> Response {
     inline_error(status, "manager-action-error", message)
 }
 
+async fn parse_message_upload(
+    request: Request,
+    state: &WebState,
+) -> std::result::Result<Action, String> {
+    let mut multipart = Multipart::from_request(request, state)
+        .await
+        .map_err(|e| e.body_text())?;
+    let mut text = None;
+    let mut images = Vec::new();
+    let mut total = 0;
+    while let Some(field) = multipart.next_field().await.map_err(|e| e.body_text())? {
+        match field.name() {
+            Some("text") if text.is_none() => {
+                text = Some(field.text().await.map_err(|e| e.body_text())?);
+            }
+            Some("manager_images") => {
+                let Some(name) = field
+                    .file_name()
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+                else {
+                    continue;
+                };
+                let bytes = field.bytes().await.map_err(|e| e.body_text())?;
+                total += bytes.len();
+                if total > manager::images::LIMIT || images.len() >= manager::images::MAX_FILES {
+                    return Err("Manager accepts up to eight images and 1 MiB per message".into());
+                }
+                images.push(
+                    manager::images::Upload::from_bytes(Path::new(&name), bytes)
+                        .map_err(|e| e.to_string())?,
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(Action::Message {
+        text: text.ok_or("Missing form field: text")?,
+        images,
+    })
+}
+
 async fn action(
     UiState(state): UiState,
     UrlPath(key): UrlPath<String>,
     Extension(name): Extension<&'static str>,
-    form: std::result::Result<FormPairs, FormRejection>,
+    request: Request,
 ) -> Response {
+    let multipart = name == "message"
+        && request
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("multipart/form-data;"));
+    let action = if multipart {
+        parse_message_upload(request, &state).await
+    } else {
+        match FormPairs::from_request(request, &state).await {
+            Ok(Form(pairs)) => parse_action(name, &Fields::from(pairs)),
+            Err(error) => Err(error.body_text()),
+        }
+    };
     blocking(move || {
         if let Some((status, message)) = startup_action_error(&state) {
             return Ok(action_error(status, &message));
@@ -403,11 +524,7 @@ async fn action(
                 "Unknown Manager repository",
             ));
         };
-        let fields = match form {
-            Ok(Form(pairs)) => Fields::from(pairs),
-            Err(error) => return Ok(action_error(StatusCode::BAD_REQUEST, &error.body_text())),
-        };
-        let action = match parse_action(name, &fields) {
+        let action = match action {
             Ok(action) => action,
             Err(message) => return Ok(action_error(StatusCode::BAD_REQUEST, &message)),
         };
@@ -475,6 +592,10 @@ fn parse_action(name: &str, fields: &Fields) -> std::result::Result<Action, Stri
     Ok(match name {
         "message" => Action::Message {
             text: field("text")?,
+            images: Vec::new(),
+        },
+        "retry-image-turn" => Action::RetryImageTurn {
+            turn_id: field("turn_id")?,
         },
         "propose" => Action::Propose,
         "approve" => Action::Approve {
