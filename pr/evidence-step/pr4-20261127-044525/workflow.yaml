@@ -1,0 +1,29 @@
+# The builtin:tdd evidence steps with a stand-in agent (agent.sh); host steps are real.
+command: [cat]
+create_pr: false
+flags:
+  evidence:
+    description: Drive touched features with the verification skill
+steps:
+  implement:
+    command: "sed -i.bak 's/hello/hello there/' src/app.sh && rm -f src/app.sh.bak"
+  evidence-prepare:
+    flag: evidence
+    command: "{cruise.bin} internal evidence-prepare"
+    accepted_exit_codes: [0, 1]
+    env:
+      CRUISE_EVIDENCE_PLAN: '{plan}'
+  evidence:
+    flag: evidence
+    skip: prev.success
+    command: "sh ../agent.sh"
+    env:
+      CRUISE_EVIDENCE_PLAN: '{plan}'
+  evidence-validate:
+    flag: evidence
+    command: "{cruise.bin} internal evidence-validate"
+    accepted_exit_codes: [0]
+    env:
+      CRUISE_EVIDENCE_PLAN: '{plan}'
+  show-plan:
+    command: "cat \"$(dirname '{plan}')/artifacts/feature-evidence/plan.md\"; ls \"$(dirname '{plan}')/artifacts/feature-evidence/files/greet\""

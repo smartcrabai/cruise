@@ -1,0 +1,10 @@
+> Where should cruise execute? Use current branch
+-> current branch: /private/var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/verify-cruise.htPBhI/repo-noskill
+
+> implement
+  v 0.0s
+  -> implement -> evidence-prepare [sequential] (edge 1/3)
+
+> evidence-prepare
+  stderr: feature evidence: no verification skill: add `.agents/skills/verify-<app>/` with a feature map, or turn the `evidence` flag off
+Error: required command failed for step 'evidence-prepare' (command: '/Users/admin/orca/workspaces/cruise/cruise-pstack/target/debug/cruise-runtime' internal evidence-prepare; exit code: Some(2); signal: None; accepted exit codes: [0, 1]): command exit status is missing or not in accepted_exit_codes

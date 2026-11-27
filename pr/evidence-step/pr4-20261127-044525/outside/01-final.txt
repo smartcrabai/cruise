@@ -1,0 +1,20 @@
+> Where should cruise execute? Use current branch
+-> current branch: /private/var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/verify-cruise.htPBhI/repo-outside
+
+> implement
+  v 0.0s
+  -> implement -> evidence-prepare [sequential] (edge 1/3)
+
+> evidence-prepare
+  Feature evidence is owed for this change.
+  v 0.1s
+  -> evidence-prepare -> evidence [sequential] (edge 1/3)
+
+> evidence
+  {"features":[{"id":"greet","status":"proved","summary":"sh src/app.sh cruise printed hello, cruise (exit 0)","files":["target/verify-cruise/20261127044527060_a3f5b30a37004eb1a6b07a9445b6bba0//greet/01-final.txt","target/verify-cruise/20261127044527060_a3f5b30a37004eb1a6b07a9445b6bba0//greet/01-final.html","target/verify-cruise/20261127044527060_a3f5b30a37004eb1a6b07a9445b6bba0//greet/result.json"]}]}
+  v 0.1s
+  -> evidence -> evidence-validate [sequential] (edge 1/3)
+
+> evidence-validate
+  stderr: Error: feature evidence: the evidence step may edit only `.agents/skills/verify-app/`, but changed `src/app.sh`
+Error: required command failed for step 'evidence-validate' (command: '/Users/admin/orca/workspaces/cruise/cruise-pstack/target/debug/cruise-runtime' internal evidence-validate; exit code: Some(1); signal: None; accepted exit codes: [0]): command exit status is missing or not in accepted_exit_codes

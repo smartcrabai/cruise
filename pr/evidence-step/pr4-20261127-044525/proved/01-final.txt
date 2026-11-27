@@ -1,0 +1,33 @@
+> Where should cruise execute? Use current branch
+-> current branch: /private/var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/verify-cruise.htPBhI/repo-proved
+
+> implement
+  v 0.0s
+  -> implement -> evidence-prepare [sequential] (edge 1/3)
+
+> evidence-prepare
+  Feature evidence is owed for this change.
+  v 0.1s
+  -> evidence-prepare -> evidence [sequential] (edge 1/3)
+
+> evidence
+  {"features":[{"id":"greet","status":"proved","summary":"sh src/app.sh cruise printed hello there, cruise (exit 0)","files":["target/verify-cruise/20261127044541397_0d112867c842407c938538dfae4a1177//greet/01-final.txt","target/verify-cruise/20261127044541397_0d112867c842407c938538dfae4a1177//greet/01-final.html","target/verify-cruise/20261127044541397_0d112867c842407c938538dfae4a1177//greet/result.json"]}]}
+  v 0.1s
+  -> evidence -> evidence-validate [sequential] (edge 1/3)
+
+> evidence-validate
+  Feature evidence proved 1 feature(s).
+  v 0.1s
+  -> evidence-validate -> show-plan [sequential] (edge 1/3)
+
+> show-plan
+  Verification skill: `.agents/skills/verify-app/SKILL.md`
+  Evidence directory for this run: `target/verify-cruise/20261127044541397_0d112867c842407c938538dfae4a1177/`
+  Features this change touches:
+  - `greet`: `.agents/skills/verify-app/features/greet.md`
+  00-01-final.txt
+  01-01-final.html
+  02-result.json
+  v 0.0s
+
+v workflow complete (5 run, 0 skipped, 0 failed) [0.3s]
