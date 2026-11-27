@@ -162,12 +162,14 @@ fn render(worklist: &Worklist, verdicts: &BTreeMap<String, (Verdict, String)>) -
         let (existing, tail) = after
             .split_once("\n## ")
             .map_or((after, ""), |(a, t)| (a, t));
-        let existing: String = existing
+        out.push_str("## Dropped\n\n");
+        for line in existing
             .lines()
             .filter(|line| !line.trim().is_empty() && line.trim() != "- none")
-            .map(|line| format!("{line}\n"))
-            .collect();
-        let _ = write!(out, "## Dropped\n\n{existing}{dropped}");
+        {
+            let _ = writeln!(out, "{line}");
+        }
+        out.push_str(&dropped);
         if !tail.is_empty() {
             let _ = write!(out, "\n## {tail}\n");
         }
