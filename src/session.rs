@@ -920,6 +920,7 @@ impl SessionManager {
         state: &SessionState,
         config: &crate::config::WorkflowConfig,
         plan: &str,
+        prepare_inputs: impl FnOnce(&Path) -> Result<()>,
     ) -> Result<SessionState> {
         validate_session_id(&state.id)?;
         let owner = state
@@ -982,6 +983,7 @@ impl SessionManager {
         let yaml = serialize_resolved_config(config)?;
         write_snapshot_atomically(&snapshot_path(&sessions, &state.id), yaml.as_bytes())?;
         write_snapshot_atomically(&state.plan_path(&sessions), plan.as_bytes())?;
+        prepare_inputs(&dir)?;
         self.save(state)?;
         Ok(state.clone())
     }

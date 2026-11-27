@@ -217,8 +217,8 @@ fn manager_fixtures() -> Vec<(&'static str, Value)> {
         (
             "manager-region",
             json!({"key": key, "snapshot": {
-                "transcript": [{"id": "turn", "role": "user", "text": "Hello", "status": "completed"}],
-                "running": false, "proposal": proposal, "goals": [goal], "prompts": [{"goal_id": "goal", "prompt": prompt}],
+                "transcript": [{"id": "turn", "role": "user", "text": "Hello", "status": "completed", "images": [], "can_retry_image": false}],
+                "running": false, "proposal": proposal, "approval_objective": "Deliver the feature", "goals": [goal], "prompts": [{"goal_id": "goal", "prompt": prompt}],
             }}),
         ),
         ("components/manager-goal", json!({"key": key, "goal": goal})),

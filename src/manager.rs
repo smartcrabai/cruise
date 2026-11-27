@@ -12,6 +12,8 @@ use std::sync::Mutex;
 
 use crate::error::{CruiseError, Result};
 
+pub(crate) mod images;
+
 static WRITER: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,6 +205,8 @@ pub struct FrozenContract {
     pub forge_host: String,
     pub forge_repository: String,
     pub workflow: crate::config::WorkflowConfig,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub task_images: std::collections::BTreeMap<String, Vec<images::Image>>,
 }
 impl Proposal {
     /// Validate the proposal's identifiers, criteria, task graph, and contract.
@@ -291,6 +295,10 @@ pub struct Turn {
     pub role: String,
     pub text: String,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<images::Image>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_started: Option<bool>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -481,6 +489,7 @@ fn freeze_contract(cwd: &Path, repo: &Path) -> Result<FrozenContract> {
         forge_host: forge.host,
         forge_repository: forge.repository,
         workflow,
+        task_images: images::TaskImages::new(),
     })
 }
 
@@ -1051,6 +1060,14 @@ pub(crate) fn resume_goal(cwd: &Path, goal_id: &str) -> Result<Goal> {
 /// # Errors
 /// Returns an error for an empty message or if repository state cannot be updated.
 pub fn message(cwd: &Path, text: String) -> Result<Turn> {
+    message_with_images(cwd, text, Vec::new())
+}
+
+pub(crate) fn message_with_images(
+    cwd: &Path,
+    text: String,
+    uploads: Vec<images::Upload>,
+) -> Result<Turn> {
     if text.trim().is_empty() {
         return Err(CruiseError::Other("message must not be empty".into()));
     }
@@ -1058,15 +1075,40 @@ pub fn message(cwd: &Path, text: String) -> Result<Turn> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut snapshot = load(repository(cwd)?)?;
+    let images = images::store(&snapshot.repository, uploads)?;
     let turn = Turn {
         id: uuid::Uuid::new_v4().to_string(),
         role: "user".into(),
         text,
         status: "interrupted".into(),
+        image_started: (!images.is_empty()).then_some(false),
+        images,
     };
     snapshot.transcript.push(turn.clone());
     save(&snapshot)?;
     Ok(turn)
+}
+
+pub(crate) fn claim_image_turn(cwd: &Path, expected: &Turn) -> Result<()> {
+    let _guard = WRITER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut snapshot = load(repository(cwd)?)?;
+    let turn = snapshot
+        .transcript
+        .iter_mut()
+        .find(|turn| {
+            turn.id == expected.id
+                && turn.role == "user"
+                && turn.status == "interrupted"
+                && turn.image_started == Some(false)
+                && !turn.images.is_empty()
+                && turn.images == expected.images
+                && turn.text == expected.text
+        })
+        .ok_or_else(|| CruiseError::Other("Manager image turn is not eligible to retry".into()))?;
+    turn.image_started = Some(true);
+    save(&snapshot)
 }
 
 /// Complete a previously persisted user turn and append the provider response.
@@ -1087,6 +1129,8 @@ pub(crate) fn finish_message(cwd: &Path, id: &str, text: String) -> Result<Turn>
         role: "assistant".into(),
         text,
         status: "completed".into(),
+        images: Vec::new(),
+        image_started: None,
     };
     snapshot.transcript.push(reply.clone());
     save(&snapshot)?;
@@ -1110,6 +1154,8 @@ pub(crate) fn fail_turn(cwd: &Path, id: &str, error: &str) -> Result<()> {
         role: "assistant".into(),
         text: format!("Turn interrupted: {error}. Resubmit explicitly to retry."),
         status: "interrupted".into(),
+        images: Vec::new(),
+        image_started: None,
     });
     save(&snapshot)
 }
@@ -1281,20 +1327,23 @@ pub(crate) fn approve_corrective(
 /// # Errors
 /// Returns an error if the proposal is invalid or repository state cannot be updated.
 pub fn save_proposal(cwd: &Path, proposal: Proposal) -> Result<Proposal> {
-    save_proposal_for_turn(cwd, proposal, None)
+    save_proposal_for_turn(cwd, proposal, None, images::RequestedImages::new())
 }
 
 pub(crate) fn save_proposal_for_turn(
     cwd: &Path,
     mut proposal: Proposal,
     turn_id: Option<&str>,
+    requested_images: images::RequestedImages,
 ) -> Result<Proposal> {
     let _guard = WRITER
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut snapshot = load(repository(cwd)?)?;
     proposal.workflow = "builtin:tdd".into();
-    proposal.contract = Some(freeze_contract(cwd, &snapshot.repository)?);
+    let mut contract = freeze_contract(cwd, &snapshot.repository)?;
+    contract.task_images = images::bind(&snapshot, &proposal.tasks, requested_images)?;
+    proposal.contract = Some(contract);
     proposal.id = turn_id.map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_owned);
     proposal.revision = snapshot
         .proposal
@@ -1351,6 +1400,9 @@ pub fn approve(cwd: &Path, proposal_id: &str, revision: u64) -> Result<Goal> {
         .contract
         .as_ref()
         .ok_or_else(|| CruiseError::Other("proposal has no frozen execution contract".into()))?;
+    for image in contract.task_images.values().flatten() {
+        image.read(&snapshot.repository)?;
+    }
     let execution = GoalExecution {
         anchor: Some(contract.anchor.clone()),
         origin: Some(contract.origin.clone()),

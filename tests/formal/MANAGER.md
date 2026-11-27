@@ -28,6 +28,8 @@ The production regression also accepts a finalized but unintegrated result super
 
 `manager_goal_projection.qnt` models the redacted snapshot boundary for Manager conversation and proposal drafting. Completed Goals expose only ID, objective, and status to the provider; unfinished Goals retain their context, and durable records remain intact. The Manager CI runner checks the model and captures the production prompt in a fake SDK regression.
 
+`manager_image_binding.qnt` models durable private input, no replay across restart, and task-scoped delivery at the approved revision. Manager CI checks the model and runs an isolated CLI, daemon, fake SDK, and child-workflow regression with real image bytes.
+
 ## Local execution, 2026-11-20
 
 `bash scripts/check_manager_specs.sh` passed on macOS arm64. Its exact commands and output are in `target/formal-reports/manager.q9JVSV/commands.log` and the adjacent logs. The invocation ran the following substantive checks (the runner expands `Q` to the pinned binary and uses an isolated temporary backend endpoint):

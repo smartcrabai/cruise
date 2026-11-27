@@ -65,7 +65,7 @@ export default function ManagerGoal(props) {
       <h4 class="font-semibold">{props.t.manager.corrective_preview}</h4>
       <p class="text-sm font-mono break-all">{props.goal.execution.corrective_preview.title}</p>
       <p class="text-sm whitespace-pre-wrap break-words">{props.goal.execution.corrective_preview.summary}</p>
-      {props.goal.execution.can_approve_corrective && <ManagerReview t={props.t} corrective={true} dialogId={`manager-approve-corrective-${props.goal.execution.corrective_preview.id}`} url={`/webui/manager/${props.key}/approve-corrective`} goalId={props.goal.id} previewId={props.goal.execution.corrective_preview.id} revision={props.goal.execution.corrective_preview.revision} objective={props.goal.execution.corrective_preview.title} instructions={props.goal.execution.corrective_preview.summary} target={props.goal.execution.corrective_preview.integrated_tip} />}
+      {props.goal.execution.can_approve_corrective && <ManagerReview t={props.t} corrective={true} reviewId={`manager-approve-corrective-${props.goal.execution.corrective_preview.id}`} url={`/webui/manager/${props.key}/approve-corrective`} goalId={props.goal.id} previewId={props.goal.execution.corrective_preview.id} revision={props.goal.execution.corrective_preview.revision} objective={props.goal.execution.corrective_preview.title} instructions={props.goal.execution.corrective_preview.summary} target={props.goal.execution.corrective_preview.integrated_tip} />}
     </div>}
   </article>;
 }

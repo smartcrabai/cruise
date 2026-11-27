@@ -12,14 +12,23 @@ export default function ManagerRegion(props) {
         {props.snapshot.transcript.map(turn => <li id={`manager-turn-${turn.id}`} class="p-3 border border-gray-300 dark:border-gray-700 rounded">
           <div class="text-sm font-semibold">{turn.role === "user" ? props.t.manager.user : turn.role === "assistant" ? props.t.manager.assistant : turn.role}</div>
           <p class="whitespace-pre-wrap break-words">{turn.text}</p>
+          {turn.images.map(image => <a href={`/webui/manager/${props.key}/images/${image.id}`} class="block w-fit">
+            <img src={`/webui/manager/${props.key}/images/${image.id}`} alt={`${image.id}.${image.extension}`} loading="lazy" class="mt-2 max-h-40 max-w-full rounded border border-gray-300 dark:border-gray-700" />
+          </a>)}
+          {turn.can_retry_image && <form hx-post={`/webui/manager/${props.key}/retry-image-turn`} hx-swap="none">
+            <input type="hidden" name="turn_id" value={turn.id} />
+            <button type="submit" disabled={props.snapshot.running} class="mt-2 px-2 py-1 border rounded text-sm">Retry image turn</button>
+          </form>}
           {turn.status === "running" && <p class="text-sm">{props.t.manager.running}</p>}
           {turn.status === "interrupted" && <p class="text-sm">{props.t.manager.interrupted}</p>}
           {turn.status === "completed" && <p class="text-sm text-gray-500 dark:text-gray-400">{props.t.manager.completed}</p>}
         </li>)}
       </ol>}
-      <form data-manager-reset-composer="true" hx-post={`/webui/manager/${props.key}/message`} hx-swap="none" hx-disable="this" class="space-y-2">
+      <form id="manager-composer" data-manager-reset-composer="true" hx-post={`/webui/manager/${props.key}/message`} hx-encoding="multipart/form-data" hx-swap="none" hx-disable="this" class="space-y-2">
         <label for="manager-message" class="block text-sm">{props.t.manager.message}</label>
         <textarea id="manager-message" name="text" rows="3" required class="w-full bg-transparent border border-gray-300 dark:border-gray-700 rounded px-3 py-2"></textarea>
+        <label for="manager-images" class="block text-sm">Images</label>
+        <input id="manager-images" type="file" name="manager_images" accept="image/png,image/jpeg,image/gif,image/webp" multiple class="block w-full text-sm" />
         <button type="submit" disabled={props.snapshot.running} class="px-4 py-2 rounded bg-blue-600 text-white text-sm disabled:opacity-50">{props.t.manager.send}</button>
       </form>
       <form hx-post={`/webui/manager/${props.key}/propose`} hx-swap="none" hx-disable="this">
@@ -61,7 +70,7 @@ export default function ManagerRegion(props) {
           <h3 class="font-semibold">{props.t.manager.exclusions}</h3>
           <ul class="list-disc ml-5">{props.snapshot.proposal.exclusions.map(exclusion => <li class="whitespace-pre-wrap break-words">{exclusion}</li>)}</ul>
         </div>}
-        <ManagerReview t={props.t} corrective={false} dialogId={`manager-approve-${props.snapshot.proposal.id}-${props.snapshot.proposal.revision}`} url={`/webui/manager/${props.key}/approve`} proposalId={props.snapshot.proposal.id} revision={props.snapshot.proposal.revision} objective={props.snapshot.proposal.objective} target={props.snapshot.proposal.target_sha} />
+        <ManagerReview t={props.t} corrective={false} reviewId={`manager-approve-${props.snapshot.proposal.id}-${props.snapshot.proposal.revision}`} url={`/webui/manager/${props.key}/approve`} proposalId={props.snapshot.proposal.id} revision={props.snapshot.proposal.revision} objective={props.snapshot.approval_objective} target={props.snapshot.proposal.target_sha} />
       </div>}
     </section>
     <section aria-labelledby="manager-goals-title" class="space-y-3 border-t border-gray-300 dark:border-gray-700 pt-4">

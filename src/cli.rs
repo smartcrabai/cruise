@@ -177,6 +177,12 @@ pub enum ManagerCommand {
         /// Print the turn ID and return without waiting for the reply.
         #[arg(long)]
         no_wait: bool,
+        /// Attach a local PNG, JPEG, GIF, or WebP. Repeat to attach more.
+        #[arg(long, value_name = "FILE")]
+        image: Vec<std::path::PathBuf>,
+        /// Explicitly retry a saved image turn that never started.
+        #[arg(long, value_name = "TURN", conflicts_with_all = ["text", "image"])]
+        retry_image_turn: Option<String>,
     },
     /// Draft a goal proposal for review.
     Propose {

@@ -45,19 +45,20 @@ pub(crate) async fn run(args: ManagerArgs) -> Result<()> {
         ManagerCommand::Say {
             text: message,
             no_wait,
+            image,
+            retry_image_turn,
         } => {
-            if message.is_none() {
-                crate::manager::repository(std::path::Path::new(cwd))?;
-            }
-            let message = read_input(message, tty, "message_input")?;
-            return conversation(
-                &client,
-                cwd,
-                json!({"type":"message", "text":message.trim()}),
-                no_wait,
-                false,
-            )
-            .await;
+            let action = if let Some(turn_id) = retry_image_turn {
+                json!({"type":"retry_image_turn", "turn_id":turn_id})
+            } else {
+                if message.is_none() {
+                    crate::manager::repository(std::path::Path::new(cwd))?;
+                }
+                let message = read_input(message, tty, "message_input")?;
+                let images = crate::manager::images::read_uploads(&image)?;
+                json!({"type":"message", "text":message.trim(), "images":images})
+            };
+            return conversation(&client, cwd, action, no_wait, false).await;
         }
         ManagerCommand::Propose { no_wait } => {
             return conversation(&client, cwd, json!({"type":"propose"}), no_wait, true).await;
@@ -405,6 +406,16 @@ fn print_turn(turn: &Value) {
         turn["status"].as_str().unwrap_or(&text("unknown")),
         turn["text"].as_str().unwrap_or("")
     );
+    if let Some(images) = turn["images"].as_array() {
+        for image in images {
+            println!(
+                "  {}.{} ({})",
+                image["id"].as_str().unwrap_or_default(),
+                image["extension"].as_str().unwrap_or_default(),
+                image["sha256"].as_str().unwrap_or_default()
+            );
+        }
+    }
 }
 
 fn show_turn_proposal(snapshot: &Value, id: &str) -> Result<()> {
