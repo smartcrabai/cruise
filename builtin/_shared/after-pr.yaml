@@ -95,9 +95,11 @@ steps:
 
       Repair only an evidence-backed failure within the approved scope. Preserve unrelated work and never weaken tests, scanners, assertions, required checks, or policy. Run applicable local checks; the host commits and publishes the exact staged tree, verifying it first when a trusted verifier is configured. Do not stage, commit, push, call the forge, or retry jobs yourself.
 
+      A check marked `External` (a commit status or another app's check run, not GitHub Actions) has no log and cannot be retried: treat its description and details URL as its evidence, repair it only when they, or a local reproduction, show an in-scope cause in this repository, and otherwise return `wait`.
+
       Return exactly one JSON object with no Markdown:
       - `{{"action":"commit"}}` after an in-scope repair.
-      - `{{"action":"retry","selection":1}}` only for a documented flaky or unrelated failure when no files were changed; use the eligible job ordinal in the evidence in place of `1`. The host can retry at most once for the same head.
+      - `{{"action":"retry","selection":1}}` only for a documented flaky or unrelated failure when no files were changed; use the ordinal of an eligible job (never an `External` check) in the evidence in place of `1`. The host can retry at most once for the same head.
       - `{{"action":"wait"}}` when neither action is justified, including incomplete evidence or when every check is marked `Runner unacquired` (the host already reran those jobs up to its limit). This leaves the PR/MR unmerged.
   wait-ci:
     timeout: 60m

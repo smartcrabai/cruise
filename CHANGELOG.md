@@ -69,6 +69,7 @@
 
 ### Fixed
 
+- Put failing GitHub commit statuses and other apps' check runs (external CI) in the after-PR CI evidence as `External` checks with their name, state, description, and URL. Previously the evidence listed no check, so CI repair answered `wait` and the run stopped with `CI remains unresolved` even when the description named an in-scope fix. External checks are never retried, and a `wait` now names them.
 - Make built-in after-PR base sync independent of Git's `merge.ff` setting: fast-forward when possible and keep the existing conflict checks.
 - Allow Manager retarget after an integrated retry supersedes an older finalized result. Retarget still rejects unintegrated latest attempts and unresolved work.
 - Recognize the complete `gh pr create` error wrapper when recovering a confirmed legacy GitHub title rejection, without changing the retry safety checks.
