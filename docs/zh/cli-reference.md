@@ -226,6 +226,7 @@ Options:
 - `formal_methods` 在计划审批后、`pre/*` 和实现前先编写 Quint 模型。在会话的 WebUI 面板或 CLI 中检查 PNG。CLI 在支持的 Kitty 和 iTerm2 终端中内嵌显示图像，也会打印菜单打开期间可手动查看的路径。可以批准、拒绝并停止，或提出修改并查看新版。[Quint 工具设置](configuration.md#quint-workflow-review)。关闭时行为不变。
 - `advisor` 在 `builtin:tdd` 完成实现后启用一次[只读顾问评审](sdk.md#advisor-steps)（仅限 jcode，默认关闭）。普通错误会跳过 `apply-advice`；成功时普通模型会检查一次建议，即使结果是 `NO FINDINGS`。
 - `interrogate` 为 `builtin:tdd` 的评审循环增加复现关卡（默认关闭）。consolidate 之后，只读的 `reproduce` 步骤运行每个 REV/PLAN/WIRE 工作项的 `repro:` 命令，宿主只把复现成功的项（以及 SIMP/DOC 项）交给 apply。未复现的项以 `not reproduced` 丢弃；blocked 项不做修改并保持 `persists`；复现期间工作区发生变化会停止运行。
+- `evidence` 在评审循环之后，使用仓库的验证 skill（`.agents/skills/verify-*/`，按各 feature 文件的 `Covers:` 路径匹配）运行此次变更涉及的功能，并在 PR/MR 的 `## Implementation evidence` 中添加 `### Feature journeys`（默认关闭）。在 GitHub 上，截图、终端画面和录屏会推送到 `cruise-evidence` 分支并按提交链接。缺少 skill、功能失败或被阻塞、出现类似凭据的文本、或在 skill 之外的编辑都会在创建 PR 之前停止运行。PR 之后工作区发生变化时（CI 修复或基线同步），该节会被标记为过期，并在合并前重新采集证据。
 
 `research` 仍为只读且 `create_pr: false`；`merge` 不会创建 PR，也不会覆盖该禁止创建 PR 的策略。如果因为未创建 PR 而无法执行已启用的 after-PR 操作（包括 `research`、`exec`、Current-branch 运行或没有提交的运行），Cruise 会跳过该操作并打印原因。
 

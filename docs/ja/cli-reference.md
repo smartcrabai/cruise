@@ -226,6 +226,7 @@ Git 管理されていないディレクトリでは警告を出してその場�
 - `formal_methods` は plan 承認後、`pre/*` や実装の前に Quint モデルだけを作成します。WebUI のセッション内パネル、または CLI で PNG を確認します。CLI は Kitty・iTerm2 の対応端末ではインラインに表示し、メニュー表示中に手動で開けるパスも出します。承認・却下（停止）・修正依頼（新版を確認）を選びます。[Quint のセットアップ](configuration.md#quint-workflow-review)。off の挙動は変わりません。
 - `advisor` は `builtin:tdd` の実装後に[読み取り専用のアドバイザー確認](sdk.md#advisor-steps)を一度だけ実行します（jcode 専用、既定はオフ）。通常の失敗時は `apply-advice` を飛ばし、成功時は `NO FINDINGS` の場合も通常モデルが助言を一度確認します。
 - `interrogate` は `builtin:tdd` のレビューループに再現の門を足します（既定はオフ）。consolidate の後、読み取り専用の `reproduce` step が REV/PLAN/WIRE の各 worklist 項目の `repro:` コマンドを実行し、ホストは再現できた項目（と SIMP/DOC の項目）だけを apply に渡します。再現しない項目は `not reproduced` として落とし、blocked の項目は編集せず `persists` のままにします。再現中にワークスペースが変わると実行を止めます。
+- `evidence` は、レビューループの後に、変更が触る機能をリポジトリの検証 skill（`.agents/skills/verify-*/`。各 feature ファイルの `Covers:` のパスで対応付け）で動かし、PR/MR の `## Implementation evidence` に `### Feature journeys` を追加します（既定はオフ）。GitHub では、スクリーンショット・端末の画面・録画を `cruise-evidence` ブランチに push し、commit 単位でリンクします。skill がない、機能の失敗や blocked、資格情報らしい文字列、skill 外の編集のいずれかがあれば PR の前で止めます。PR の後にワークスペースが進んだ場合（CI 修正や base 同期）は、その節を stale と表示し、merge の前に証跡を取り直します。
 
 `research` は `create_pr: false` の read-only workflow です。`merge` は PR を作成せず、no-PR policy を上書きしません。PR が作成されないため opt-in の after-PR 処理を利用できない場合（`research`、`exec`、current-branch run、commit のない run など）、Cruise は理由を表示してその処理をスキップします。
 

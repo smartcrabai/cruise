@@ -7,6 +7,8 @@ description: Drive this checkout's Cruise CLI/TUI in a real PTY and its WebUI in
 
 Prove a change the way a user meets it: build this checkout, start a daemon that belongs to this run, drive the real `cruise` binary in a pseudo-terminal or the WebUI in a browser, and keep the screens. Never drive the user's own daemon, `~/.local/share/cruise`, `~/apps/cruise`, or existing sessions and Goals. Every command below runs from the repository root.
 
+Cruise's `builtin:tdd` flag `evidence` runs this skill for the features whose `Covers:` paths a change touches: it lists them in a plan, expects evidence files under `target/verify-cruise/`, and publishes them in the PR/MR.
+
 ## Launch
 
 ```sh

@@ -506,6 +506,14 @@ pub enum InternalCommand {
     InterrogateBaseline,
     /// Keep only reproduced behavioral worklist items (flag `interrogate`).
     InterrogateFilter,
+    /// Pick the features a change touches; exit 1 when there is one to drive (flag `evidence`).
+    EvidencePrepare,
+    /// Validate the evidence report and bind it to the working tree (flag `evidence`).
+    EvidenceValidate,
+    /// After-PR: exit 1 and mark the section stale when the evidence predates the workspace.
+    EvidenceRefreshCheck,
+    /// After-PR: validate refreshed evidence and replace the PR/MR section.
+    EvidenceRepublish,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]

@@ -445,8 +445,21 @@ async fn create_pr_attempt(
     cancel_token: Option<&CancellationToken>,
     on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
 ) -> Result<PrAttemptOutcome> {
-    let evidence =
+    let mut evidence =
         crate::quint_workflow::publication_evidence(session, vars.artifacts_root(), &ctx.path)?;
+    if let Some(root) = vars.artifacts_root()
+        && let Some(journeys) = crate::feature_evidence::publication(
+            root,
+            &ctx.path,
+            &session.id,
+            crate::forge::session_forge(session),
+        )?
+    {
+        let mut section = evidence.unwrap_or_else(|| "## Implementation evidence\n".to_owned());
+        section.push('\n');
+        section.push_str(&journeys);
+        evidence = Some(section);
+    }
     let (pr_title, pr_body) = generate_pr_description(
         &ctx.path,
         Some(&session.id),
