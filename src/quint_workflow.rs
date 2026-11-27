@@ -23,7 +23,7 @@ pub(crate) use tools::Tools;
 pub(crate) const FLAG: &str = "formal_methods";
 pub(crate) const APPROVED_VAR: &str = "quint.approved";
 pub(crate) const MAX_PNG: usize = 1024 * 1024;
-const MODEL_LIMIT: usize = 64 * 1024;
+pub(crate) const MODEL_LIMIT: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case")]
@@ -87,7 +87,7 @@ pub(crate) fn error(message: impl Into<String>) -> CruiseError {
     CruiseError::Other(message.into())
 }
 
-fn sha256(bytes: &[u8]) -> String {
+pub(crate) fn sha256(bytes: &[u8]) -> String {
     crate::http_download::hex_digest(&Sha256::digest(bytes))
 }
 
@@ -257,13 +257,20 @@ impl Files {
     }
 
     pub(crate) fn approved(&self, preview: &Preview) -> Result<PathBuf> {
-        let name = format!("{}.qnt", preview.model_sha256);
-        if sha256(&self.read_model(&name)?) != preview.model_sha256 {
+        self.approved_bytes(preview)?;
+        Ok(self
+            .root
+            .join(self.name(&format!("{}.qnt", preview.model_sha256))))
+    }
+
+    pub(crate) fn approved_bytes(&self, preview: &Preview) -> Result<Vec<u8>> {
+        let bytes = self.read_model(&format!("{}.qnt", preview.model_sha256))?;
+        if sha256(&bytes) != preview.model_sha256 {
             return Err(error(
                 "Approved Quint model changed; reset the execution for a new review",
             ));
         }
-        Ok(self.root.join(self.name(&name)))
+        Ok(bytes)
     }
 
     pub(crate) fn prior_candidate(&self) -> String {

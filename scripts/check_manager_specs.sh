@@ -64,6 +64,10 @@ run_check manager-goal-projection-typecheck "$Q" typecheck tests/formal/manager_
 run_check manager-goal-projection-test "$Q" test tests/formal/manager_goal_projection.qnt --backend typescript --seed 61
 run_check manager-image-binding-typecheck "$Q" typecheck tests/formal/manager_image_binding.qnt
 run_check manager-image-binding-test "$Q" test tests/formal/manager_image_binding.qnt --backend typescript --seed 61
+QUINT_HANDOFF=tests/formal/manager_quint_file.qnt
+run_check manager-quint-file-typecheck "$Q" typecheck "$QUINT_HANDOFF"
+run_check manager-quint-file-test "$Q" test "$QUINT_HANDOFF" --backend typescript --seed 61
+require_tests "$RUN/manager-quint-file-test.log" exactModelReachesChildByReferenceTest unapprovedSourceCannotReadTest invalidatedSourceCannotBindTest staleProposalCannotBindTest anotherGoalOrTaskCannotReadTest anotherRepoCannotReadTest invalidationBetweenApprovalAndDispatchStopsChildTest changedBytesStopChildTest
 run_check alloy java -jar target/formal-tools/alloy-6.2.0.jar exec --command '*' --solver sat4j --type json --output "$RUN/alloy" tests/formal/manager.als
 run_check alloy-receipt node scripts/formal/check_alloy_receipt.cjs tests/formal/manager.als "$RUN/alloy/receipt.json"
 run_check receipt-validator-tests node --test scripts/formal/check_alloy_receipt.test.cjs

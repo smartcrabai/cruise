@@ -9,6 +9,18 @@ export default function ManagerReview(props) {
           {props.corrective && <p class="whitespace-pre-wrap break-words">{props.instructions}</p>}
           <p class="text-sm">{`${props.t.manager.revision}: ${props.revision}`}</p>
           <p class="text-sm"><span>{props.t.manager.target}: </span><code class="break-all">{props.target}</code></p>
+          {!props.corrective && props.quintBindings.length > 0 && <ul class="space-y-2">
+            {props.quintBindings.map(entry => <li class="space-y-1 border border-gray-300 dark:border-gray-700 rounded p-3 text-sm">
+              <strong>Approved Quint input for task <code>{entry.task}</code></strong>
+              <div class="break-all">Source session: <code>{entry.binding.source_session}</code></div>
+              <div class="break-all">Source execution: <code>{entry.binding.source_execution}</code></div>
+              <div class="break-all">Model SHA-256: <code>{entry.binding.model_sha256}</code></div>
+              <div class="break-all">PNG SHA-256: <code>{entry.binding.png_sha256}</code></div>
+              <a href={entry.url} target="_blank" rel="noopener">
+                <img src={entry.url} alt="Approved Quint model diagram" class="max-h-36 max-w-full rounded border border-gray-300 dark:border-gray-700" />
+              </a>
+            </li>)}
+          </ul>}
           {props.corrective ? <>
             <input type="hidden" name="goal_id" value={props.goalId} />
             <input type="hidden" name="preview_id" value={props.previewId} />

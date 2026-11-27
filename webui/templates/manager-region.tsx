@@ -70,7 +70,21 @@ export default function ManagerRegion(props) {
           <h3 class="font-semibold">{props.t.manager.exclusions}</h3>
           <ul class="list-disc ml-5">{props.snapshot.proposal.exclusions.map(exclusion => <li class="whitespace-pre-wrap break-words">{exclusion}</li>)}</ul>
         </div>}
-        <ManagerReview t={props.t} corrective={false} reviewId={`manager-approve-${props.snapshot.proposal.id}-${props.snapshot.proposal.revision}`} url={`/webui/manager/${props.key}/approve`} proposalId={props.snapshot.proposal.id} revision={props.snapshot.proposal.revision} objective={props.snapshot.approval_objective} target={props.snapshot.proposal.target_sha} />
+        <form hx-post={`/webui/manager/${props.key}/bind-quint`} hx-swap="none" hx-disable="this" class="space-y-2 rounded border border-gray-300 dark:border-gray-700 p-3 text-sm">
+          <h3 class="font-semibold">Attach an approved Quint model</h3>
+          <input type="hidden" name="proposal_id" value={props.snapshot.proposal.id} />
+          <input type="hidden" name="revision" value={props.snapshot.proposal.revision} />
+          <label class="block">Destination task
+            <select name="task_id" required class="ml-2 border rounded bg-transparent px-2 py-1">
+              {props.snapshot.proposal.tasks.map(task => <option value={task.id}>{task.id}</option>)}
+            </select>
+          </label>
+          <label class="block">Source session ID
+            <input name="source_session" required class="ml-2 border rounded bg-transparent px-2 py-1" />
+          </label>
+          <button type="submit" class="px-3 py-1 rounded border border-gray-300 dark:border-gray-700">Attach to preview</button>
+        </form>
+        <ManagerReview t={props.t} corrective={false} reviewId={`manager-approve-${props.snapshot.proposal.id}-${props.snapshot.proposal.revision}`} url={`/webui/manager/${props.key}/approve`} proposalId={props.snapshot.proposal.id} revision={props.snapshot.proposal.revision} objective={props.snapshot.approval_objective} target={props.snapshot.proposal.target_sha} quintBindings={props.snapshot.quint_bindings} />
       </div>}
     </section>
     <section aria-labelledby="manager-goals-title" class="space-y-3 border-t border-gray-300 dark:border-gray-700 pt-4">

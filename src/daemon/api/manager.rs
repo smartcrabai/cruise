@@ -106,6 +106,12 @@ pub(crate) enum Action {
         #[serde(flatten)]
         request: crate::manager_coordinator::corrections::CorrectionRequest,
     },
+    BindQuint {
+        proposal_id: String,
+        revision: u64,
+        task_id: String,
+        source_session: String,
+    },
     Approve {
         proposal_id: String,
         revision: u64,
@@ -193,6 +199,18 @@ pub(crate) fn dispatch_action(
                 &expected_tip,
                 request,
                 &state.manager_stop,
+            )?)?,
+            Action::BindQuint {
+                proposal_id,
+                revision,
+                task_id,
+                source_session,
+            } => serde_json::to_value(manager::bind_quint(
+                cwd,
+                &proposal_id,
+                revision,
+                task_id,
+                &source_session,
             )?)?,
             Action::Approve {
                 proposal_id,

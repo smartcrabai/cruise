@@ -24,6 +24,8 @@ The browser test verifies that the inline approval panel stays open during polli
 
 The Manager browser scenario also pastes a PNG, sends the composer, checks the saved SHA-256 and exact authenticated image bytes, and verifies that the preview is still present after reload (`07-manager-image.png`).
 
+The Quint browser scenario also takes a real approved model into Manager, checks CLI refusals, exact PNG bytes and a non-blocking revision approval, and confirms that only the named child reads the matching model. Set `WEBUI_QUINT_PTY` to a Python 3 executable to capture the same CLI commands in a real PTY alongside the WebUI screenshots.
+
 To exercise the distinct Ask path, run `WEBUI_MANAGER_BROWSER_ASK=1 cargo +1.99.1 test --locked --all-features --lib manager_answer_keeps_live_ask_pending_until_valid_reply` after the same Playwright setup. The Rust fixture starts the production HTTP router on loopback and registers an owned Ask with the real application runtime, without invoking a model. Chromium submits a whitespace-only reply through the form, checks the visible rejection, and then submits a valid reply. Rust verifies delivery to the waiting task. The Ask screenshots are `ask-blank-rejected.png` and `ask-answer.png` in the same report directory. The responsive WebUI GitHub Actions workflow runs both Manager browser scenarios and uploads the screenshots. Without the opt-in variable, the Rust test still runs its ordinary in-process router assertions.
 
 ## Managed-child browser boundary

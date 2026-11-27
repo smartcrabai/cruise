@@ -122,7 +122,7 @@ pub(crate) fn read_bytes(root: &Path, name: &str, max_size: usize) -> Result<Vec
 }
 
 pub(crate) fn ensure_private_directory(path: &Path) -> Result<()> {
-    let name = "image directory";
+    let name = "private artifact directory";
     ensure_directory_ancestors(path, name, write_error)?;
     let parent = path
         .parent()
