@@ -173,6 +173,19 @@ pub(crate) fn finish(
                     context.head
                 )));
             }
+            let external: Vec<String> = inventory
+                .checks
+                .iter()
+                .filter(|check| check.external.is_some())
+                .map(|check| format!("`{}`", check.name))
+                .collect();
+            if !external.is_empty() {
+                return Err(CruiseError::Other(format!(
+                    "CI remains unresolved: external check(s) {} failed on head {}; the host cannot read their logs or rerun them, so fix the cause or rerun them in their CI service, then run the session again; refusing to continue to native merge",
+                    external.join(", "),
+                    context.head
+                )));
+            }
             Err(CruiseError::Other(
                 "CI remains unresolved; refusing to continue to native merge".into(),
             ))
@@ -217,22 +230,37 @@ pub(crate) fn failing_checks(root: &Path) -> Result<BTreeSet<String>> {
 }
 
 fn write_check_summary(text: &mut String, check: &Check) -> Result<()> {
-    write!(
-        text,
-        "## [{}] {} — {}\n\nRun: {}\nJob: {}\nLog available: {}\n{}\n",
-        check.selection,
-        safe_text(&check.name, 160),
-        safe_text(&check.state, 80),
-        check.run_id.as_str(),
-        check.job_id.as_str(),
-        check.log_available,
-        check
-            .note
-            .as_deref()
-            .map(|note| safe_text(note, 300))
-            .unwrap_or_default(),
-    )
-    .map_err(|_| CruiseError::Other("failed to format CI evidence".into()))?;
+    let note = check
+        .note
+        .as_deref()
+        .map(|note| safe_text(note, 300))
+        .unwrap_or_default();
+    let written = match &check.external {
+        Some(external) => write!(
+            text,
+            "## [{}] {} — {}\n\nExternal {} (not GitHub Actions; no host log; the host cannot retry it)\nDescription: {}\nDetails: {}\n{note}\n",
+            check.selection,
+            safe_text(&check.name, 160),
+            safe_text(&check.state, 80),
+            external.source,
+            external
+                .description
+                .as_deref()
+                .map_or_else(|| "none".into(), |text| safe_text(text, 300)),
+            external.url.as_deref().unwrap_or("none"),
+        ),
+        None => write!(
+            text,
+            "## [{}] {} — {}\n\nRun: {}\nJob: {}\nLog available: {}\n{note}\n",
+            check.selection,
+            safe_text(&check.name, 160),
+            safe_text(&check.state, 80),
+            check.run_id.as_str(),
+            check.job_id.as_str(),
+            check.log_available,
+        ),
+    };
+    written.map_err(|_| CruiseError::Other("failed to format CI evidence".into()))?;
     if let Some(evidence) = &check.runner_unacquired {
         text.push_str("Runner unacquired (host-verified): ");
         text.push_str(&safe_text(evidence, 400));
@@ -281,7 +309,7 @@ pub(crate) fn rerun_unacquired(
         .iter()
         .map(|check| check.job_id.clone())
         .collect();
-    if !github_head_failures_seen(&context, &jobs)? {
+    if !github_head_failures_seen(&context, &jobs, &BTreeSet::new())? {
         return Err(CruiseError::Other(
             "the head has failing checks besides the runner-unacquired jobs; leaving them to the repair step".into(),
         ));
@@ -984,6 +1012,48 @@ struct Check {
     /// runner ever acquired it; such a job never ran and has no log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     runner_unacquired: Option<String>,
+    /// A failing commit status or check run of another GitHub App (external
+    /// CI). It has no Actions run, so `run_id` and `job_id` are empty, the host
+    /// has no log to fetch, and it can never be retried by the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    external: Option<External>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct External {
+    /// `commit status` or `check run`.
+    source: String,
+    /// Check-run ID; commit statuses have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    /// What the provider reported: the status description, or the check
+    /// run's output title and summary.
+    description: Option<String>,
+    /// The provider's target or details URL.
+    url: Option<String>,
+}
+
+const EXTERNAL_STATUS: &str = "commit status";
+const EXTERNAL_CHECK_RUN: &str = "check run";
+
+impl Check {
+    fn external(name: String, state: String, external: External) -> Self {
+        Self {
+            selection: 0,
+            name,
+            state,
+            run_id: String::new(),
+            job_id: String::new(),
+            retry_key: String::new(),
+            log_available: false,
+            note: Some(
+                "external check: the provider keeps no log the host can read, and the host cannot rerun it".into(),
+            ),
+            runner_unacquired: None,
+            external: Some(external),
+        }
+    }
 }
 
 fn collect_evidence(
@@ -1001,12 +1071,16 @@ fn collect_github_evidence(
     diagnostic: &DiagnosticPayload,
 ) -> Result<(Vec<Check>, String, bool)> {
     // A truncated diagnostic is reconciled below against the head's check runs.
+    // Commit statuses and other Apps' check runs have no Actions run; the host
+    // queries them itself instead of trusting the diagnostic.
     let mut complete = true;
     let mut run_ids = BTreeSet::new();
     let mut hinted_jobs: HashMap<String, BTreeSet<String>> = HashMap::new();
     for item in &diagnostic.checks {
         let Some(run_id) = item.run_id.as_ref().and_then(numeric_id) else {
-            complete = false;
+            if item.run_id.is_some() || item.job_id.is_some() {
+                complete = false;
+            }
             continue;
         };
         run_ids.insert(run_id.clone());
@@ -1015,9 +1089,6 @@ fn collect_github_evidence(
         } else if item.job_id.is_some() {
             complete = false;
         }
-    }
-    if run_ids.is_empty() {
-        complete = false;
     }
     let mut checks = Vec::new();
     let mut job_logs = Vec::new();
@@ -1075,6 +1146,7 @@ fn collect_github_evidence(
                 log_available: false,
                 note: None,
                 runner_unacquired,
+                external: None,
             });
         }
         if hinted_jobs
@@ -1084,14 +1156,156 @@ fn collect_github_evidence(
             complete = false;
         }
     }
+    let logs = render_logs(&mut checks, job_logs);
+    let (externals, externals_complete) = github_external_failures(context)?;
+    complete &= externals_complete;
+    let seen_statuses = record_external_ids(&externals, &mut seen_jobs);
+    checks.extend(externals);
     if checks.is_empty()
-        || (diagnostic.truncated && complete && !github_head_failures_seen(context, &seen_jobs)?)
+        || (diagnostic.truncated
+            && complete
+            && !github_head_failures_seen(context, &seen_jobs, &seen_statuses)?)
     {
         complete = false;
     }
     assign_selections(&mut checks)?;
-    let logs = render_logs(&mut checks, job_logs);
     Ok((checks, logs, complete))
+}
+
+/// Add external check-run IDs to `seen_jobs` and return the commit status names.
+fn record_external_ids(externals: &[Check], seen_jobs: &mut BTreeSet<String>) -> BTreeSet<String> {
+    let mut statuses = BTreeSet::new();
+    for check in externals {
+        match check
+            .external
+            .as_ref()
+            .and_then(|external| external.id.as_ref())
+        {
+            Some(id) => seen_jobs.insert(id.clone()),
+            None => statuses.insert(check.name.clone()),
+        };
+    }
+    statuses
+}
+
+/// Failing checks that no Actions run owns: commit statuses and check runs of
+/// other GitHub Apps. The host records what the provider reports about them;
+/// `false` when either list may be incomplete.
+fn github_external_failures(context: &Context) -> Result<(Vec<Check>, bool)> {
+    let repository = &context.target.repository;
+    let head = &context.head;
+    let mut checks = Vec::new();
+    let runs = provider_json(
+        &context.root,
+        "gh",
+        &context.target,
+        &format!("repos/{repository}/commits/{head}/check-runs?filter=latest&per_page=100"),
+    )?;
+    let check_runs = runs
+        .get("check_runs")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut complete = runs.get("total_count").and_then(Value::as_u64)
+        == Some(check_runs.len() as u64)
+        && check_runs.len() < 100;
+    for run in check_runs {
+        if run.pointer("/app/slug").and_then(Value::as_str) == Some("github-actions") {
+            continue;
+        }
+        // Match wait-ci: a concluded run that did not pass counts as failing.
+        let Some(conclusion) = run.get("conclusion").and_then(Value::as_str) else {
+            continue;
+        };
+        if matches!(conclusion, "success" | "neutral" | "skipped") {
+            continue;
+        }
+        let Some(id) = run.get("id").and_then(numeric_id) else {
+            complete = false;
+            continue;
+        };
+        let output = |field: &str| {
+            run.pointer(&format!("/output/{field}"))
+                .and_then(Value::as_str)
+                .map(|text| safe_text(text, 300))
+                .filter(|text| !text.is_empty())
+        };
+        let description = match (output("title"), output("summary")) {
+            (Some(title), Some(summary)) => Some(format!("{title}: {summary}")),
+            (title, summary) => title.or(summary),
+        };
+        checks.push(Check::external(
+            external_name(run.get("name")),
+            conclusion.to_ascii_lowercase(),
+            External {
+                source: EXTERNAL_CHECK_RUN.into(),
+                id: Some(id),
+                description,
+                url: external_url(run.get("details_url")),
+            },
+        ));
+    }
+    let status = provider_json(
+        &context.root,
+        "gh",
+        &context.target,
+        &format!("repos/{repository}/commits/{head}/status?per_page=100"),
+    )?;
+    let statuses = status
+        .get("statuses")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    complete &= status.get("total_count").and_then(Value::as_u64) == Some(statuses.len() as u64)
+        && statuses.len() < 100;
+    for status in statuses {
+        let state = status
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !matches!(state, "failure" | "error") {
+            continue;
+        }
+        checks.push(Check::external(
+            external_name(status.get("context")),
+            state.into(),
+            External {
+                source: EXTERNAL_STATUS.into(),
+                id: None,
+                description: status
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(|text| safe_text(text, 300))
+                    .filter(|text| !text.is_empty()),
+                url: external_url(status.get("target_url")),
+            },
+        ));
+    }
+    let key = retry_key(context);
+    for check in &mut checks {
+        check.retry_key.clone_from(&key);
+    }
+    Ok((checks, complete))
+}
+
+fn external_name(value: Option<&Value>) -> String {
+    value
+        .and_then(Value::as_str)
+        .map(|name| safe_text(name, 160))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "unnamed external check".into())
+}
+
+/// An `http(s)` provider URL without whitespace or control characters.
+fn external_url(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .filter(|url| {
+            url.len() <= 1024
+                && (url.starts_with("https://") || url.starts_with("http://"))
+                && !url.chars().any(|c| c.is_whitespace() || c.is_control())
+        })
+        .map(str::to_owned)
 }
 
 /// A completed, cancelled job that no runner was ever assigned to and that ran
@@ -1135,10 +1349,15 @@ fn github_runner_unacquired(context: &Context, job: &Value, job_id: &str) -> Opt
     ))
 }
 
-/// Whether every failing check on the head is an Actions job the host already
-/// enumerated. Confirms an inventory whose wait-step diagnostic listed only the
-/// first failing checks; any failing commit status has no collectable log.
-fn github_head_failures_seen(context: &Context, seen_jobs: &BTreeSet<String>) -> Result<bool> {
+/// Whether every failing check on the head is one the host already enumerated:
+/// an Actions job or external check run in `seen_jobs`, or a commit status in
+/// `seen_statuses`. Confirms an inventory whose wait-step diagnostic listed only
+/// the first failing checks, and that only enumerated jobs failed before a rerun.
+fn github_head_failures_seen(
+    context: &Context,
+    seen_jobs: &BTreeSet<String>,
+    seen_statuses: &BTreeSet<String>,
+) -> Result<bool> {
     let repository = &context.target.repository;
     let head = &context.head;
     let runs = provider_json(
@@ -1169,7 +1388,10 @@ fn github_head_failures_seen(context: &Context, seen_jobs: &BTreeSet<String>) ->
             matches!(
                 status.get("state").and_then(Value::as_str),
                 Some("failure" | "error")
-            )
+            ) && !status
+                .get("context")
+                .and_then(Value::as_str)
+                .is_some_and(|name| seen_statuses.contains(&safe_text(name, 160)))
         })
     {
         return Ok(false);
@@ -1353,6 +1575,7 @@ fn collect_gitlab_evidence(
             log_available: false,
             note: None,
             runner_unacquired: None,
+            external: None,
         });
     }
     if !hinted_jobs.is_subset(&matched_hints) || !pipeline_failed(&pipeline) || checks.is_empty() {
@@ -1671,8 +1894,10 @@ fn validate_inventory(inventory: &Inventory, context: &Context) -> Result<()> {
         || inventory.checks.iter().enumerate().any(|(index, check)| {
             check.selection != u32::try_from(index + 1).unwrap_or(0)
                 || check.retry_key != retry_key(context)
-                || !valid_id(&check.run_id)
-                || !valid_id(&check.job_id)
+                || match check.external {
+                    Some(_) => !check.run_id.is_empty() || !check.job_id.is_empty(),
+                    None => !valid_id(&check.run_id) || !valid_id(&check.job_id),
+                }
         })
     {
         return Err(CruiseError::Other(
@@ -1688,6 +1913,12 @@ fn retry_selected(context: &Context, inventory: &Inventory, selection: u32) -> R
         .iter()
         .find(|check| check.selection == selection)
         .ok_or_else(|| CruiseError::Other("retry selection is not in host inventory".into()))?;
+    if let Some(external) = &check.external {
+        return Err(CruiseError::Other(format!(
+            "retry selection {selection} is an external {} (`{}`); the host cannot rerun it",
+            external.source, check.name
+        )));
+    }
     if !check.log_available || !failed_state(&check.state) {
         return Err(CruiseError::Other(
             "retry requires the log of a terminal failing job".into(),
@@ -2631,8 +2862,9 @@ case "$*" in
   "api --hostname github.com --method GET --allow-escape-sequences repos/o/r/actions/jobs/201/logs") printf 'cancelled log\n' ;;
   "api --hostname github.com --method GET repos/o/r/commits/"*"/check-runs?filter=latest&per_page=100")
     if [ -n "$CRUISE_TEST_CHECK_RUNS" ]; then printf '%s\n' "$CRUISE_TEST_CHECK_RUNS"; exit; fi
-    printf '{"total_count":3,"check_runs":[{"id":200,"conclusion":"failure"},{"id":201,"conclusion":"cancelled"},{"id":%s,"conclusion":"action_required"}]}\n' "${CRUISE_TEST_EXTRA_FAILED_CHECK:-202}" ;;
+    printf '{"total_count":3,"check_runs":[{"id":200,"conclusion":"failure","app":{"slug":"github-actions"}},{"id":201,"conclusion":"cancelled","app":{"slug":"github-actions"}},{"id":%s,"conclusion":"action_required","app":{"slug":"github-actions"}}]}\n' "${CRUISE_TEST_EXTRA_FAILED_CHECK:-202}" ;;
   "api --hostname github.com --method GET repos/o/r/commits/"*"/status?per_page=100")
+    if [ -n "$CRUISE_TEST_STATUSES" ]; then printf '%s\n' "$CRUISE_TEST_STATUSES"; exit; fi
     printf '{"state":"failure","total_count":0,"statuses":[]}\n' ;;
   "run rerun 100 --repo github.com/o/r --job 200") echo "$*" >> "$CRUISE_TEST_ACTIONS" ;;
   "run rerun 100 --failed --repo github.com/o/r") echo "$*" >> "$CRUISE_TEST_ACTIONS" ;;
@@ -2799,6 +3031,7 @@ esac
             log_available: false,
             note: None,
             runner_unacquired: None,
+            external: None,
         };
         let mut checks = vec![check("long"), check("missing")];
         let long = format!("{}\nerror: the real failure\n", "noise ".repeat(MAX_LOG));
@@ -3031,6 +3264,115 @@ esac
         assert_eq!(fs::read_to_string(&fixture.pushes).unwrap_or_default(), "");
     }
 
+    /// The shape of a failing commit status: wait-ci reports it with no Actions
+    /// run or job ID, and the provider keeps its description and target URL.
+    const EXTERNAL_STATUS_DIAGNOSTIC: &str = r#"{"provider":"github","payload":{"checks":[{"name":"docs/examples","state":"FAILURE"}],"truncated":false}}"#;
+    const EXTERNAL_STATUSES: &str = r#"{"state":"failure","total_count":2,"statuses":[{"context":"docs/examples","state":"failure","description":"README.md needs an Examples section (missing: --repeat)","target_url":"https://ci.example.com/build/7"},{"context":"lint","state":"success","description":"passed","target_url":null}]}"#;
+
+    fn external_status_evidence(fixture: &Fixture) -> String {
+        super::evidence(
+            &fixture.root,
+            &fixture.plan,
+            "42",
+            "https://github.com/o/r/pull/42",
+            EXTERNAL_STATUS_DIAGNOSTIC,
+        )
+        .unwrap_or_else(|error| panic!("evidence failed: {error}"));
+        fs::read_to_string(fixture.artifacts.join(EVIDENCE))
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    #[test]
+    fn a_failing_commit_status_is_evidence_a_repair_can_commit() {
+        let fixture = Fixture::new();
+        let _statuses = EnvGuard::set("CRUISE_TEST_STATUSES", EXTERNAL_STATUSES);
+        let evidence = external_status_evidence(&fixture);
+        assert!(
+            evidence.contains("Complete inventory: `true`"),
+            "{evidence}"
+        );
+        assert!(
+            evidence.contains("## [1] docs/examples — failure\n\nExternal commit status (not GitHub Actions; no host log; the host cannot retry it)\nDescription: README.md needs an Examples section (missing: --repeat)\nDetails: https://ci.example.com/build/7\n"),
+            "{evidence}"
+        );
+        assert!(!evidence.contains("lint"), "{evidence}");
+        fs::write(fixture.root.join("tracked.txt"), "repair\n")
+            .unwrap_or_else(|error| panic!("{error}"));
+        fixture.set_decision(r#"{"action":"commit"}"#);
+        super::finish(
+            &fixture.root,
+            &fixture.plan,
+            "42",
+            "https://github.com/o/r/pull/42",
+            |_| Ok(()),
+        )
+        .unwrap_or_else(|error| panic!("repair of an external check failed: {error}"));
+        let head = fixture.current_head();
+        assert_ne!(head, fixture.head);
+        assert_eq!(fixture.remote_head(), head);
+    }
+
+    #[test]
+    fn an_external_check_is_never_retried_and_a_wait_names_it() {
+        let fixture = Fixture::new();
+        let _statuses = EnvGuard::set("CRUISE_TEST_STATUSES", EXTERNAL_STATUSES);
+        external_status_evidence(&fixture);
+        let finish = || {
+            super::finish(
+                &fixture.root,
+                &fixture.plan,
+                "42",
+                "https://github.com/o/r/pull/42",
+                |_| Ok(()),
+            )
+            .err()
+            .unwrap_or_else(|| panic!("the decision must stop the run"))
+            .to_string()
+        };
+        fixture.set_decision(r#"{"action":"retry","selection":1}"#);
+        let error = finish();
+        assert!(
+            error.contains("external commit status (`docs/examples`)"),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(&fixture.actions).unwrap_or_default(), "");
+        fixture.set_decision(r#"{"action":"wait"}"#);
+        let error = finish();
+        assert!(
+            error.contains("external check(s) `docs/examples` failed")
+                && error.contains("rerun them in their CI service"),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(&fixture.pushes).unwrap_or_default(), "");
+    }
+
+    #[test]
+    fn a_failing_check_run_of_another_app_completes_a_truncated_inventory() {
+        let fixture = Fixture::new();
+        let _runs = EnvGuard::set(
+            "CRUISE_TEST_CHECK_RUNS",
+            r#"{"total_count":2,"check_runs":[{"id":300,"name":"Preview deploy","conclusion":"failure","app":{"slug":"vercel"},"details_url":"https://vercel.example.com/o/r/300","output":{"title":"Deployment failed","summary":"Build step exited 1"}},{"id":200,"conclusion":"success","app":{"slug":"github-actions"}}]}"#,
+        );
+        super::evidence(
+            &fixture.root,
+            &fixture.plan,
+            "42",
+            "https://github.com/o/r/pull/42",
+            r#"{"provider":"github","payload":{"checks":[{"name":"Preview deploy","state":"FAILURE","url":"https://vercel.example.com/o/r/300"}],"truncated":true}}"#,
+        )
+        .unwrap_or_else(|error| panic!("evidence failed: {error}"));
+        let evidence = fs::read_to_string(fixture.artifacts.join(EVIDENCE))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            evidence.contains("Complete inventory: `true`"),
+            "{evidence}"
+        );
+        assert!(
+            evidence.contains("External check run (not GitHub Actions; no host log; the host cannot retry it)\nDescription: Deployment failed: Build step exited 1\nDetails: https://vercel.example.com/o/r/300\n"),
+            "{evidence}"
+        );
+    }
+
     const UNACQUIRED_JOB: &str = r#"{"id":201,"name":"tests (macos)","status":"completed","conclusion":"cancelled","runner_id":0,"runner_name":"","steps":[]}"#;
     const RUNNER_FAILED_JOB: &str = r#"{"id":200,"name":"tests","status":"completed","conclusion":"failure","runner_id":7,"runner_name":"GitHub Actions 7","steps":[{"name":"test"}]}"#;
     const UNACQUIRED_ANNOTATIONS: &str = r#"[{"annotation_level":"failure","message":"The job was not acquired by Runner of type hosted even after multiple attempts"},{"annotation_level":"notice","message":"Due to capacity constraints, jobs may queue longer."}]"#;
@@ -3040,7 +3382,11 @@ esac
     fn provider_jobs(jobs: &[&str], failing: &[u64], annotations: &str) -> Vec<EnvGuard> {
         let check_runs: Vec<_> = failing
             .iter()
-            .map(|id| format!(r#"{{"id":{id},"conclusion":"cancelled"}}"#))
+            .map(|id| {
+                format!(
+                    r#"{{"id":{id},"conclusion":"cancelled","app":{{"slug":"github-actions"}}}}"#
+                )
+            })
             .collect();
         vec![
             EnvGuard::set(

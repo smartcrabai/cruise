@@ -112,6 +112,13 @@ recounts. Mixed failures, other forges, a spent limit, or any refusal go to
 `ci-premise-check` and then `fix-ci-error`; mixed failures are not rerun because a repair pushes
 a new head and `--failed` would also rerun the genuine failures.
 
+On GitHub the evidence also lists failing commit statuses and other apps'
+check runs as `External` checks (name, state, description, target or details
+URL), requeried by the host from the PR head. They have no host log and are
+never retried; `fix-ci-error` repairs one only when its description or a local
+reproduction shows an in-scope cause, otherwise `wait` stops the run naming
+the external checks.
+
 `ci-premise-check` (`{cruise.bin} internal premise-check ci`) exits 0 and
 continues to `fix-ci-error` unless two host-committed repairs already failed
 against a still-failing check with no premise tested since; then it exits 1
