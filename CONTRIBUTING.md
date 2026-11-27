@@ -15,6 +15,7 @@ Thank you for your interest in contributing.
 - Keep pull requests small and reviewable.
 - Explain why the change is needed, not only what changed.
 - Link related issues when applicable.
+- Include implementation evidence: a real terminal screen for CLI/TUI changes and a screenshot for WebUI changes. `.agents/skills/verify-cruise/SKILL.md` builds the checkout, drives it in an isolated home, and captures both.
 - Be respectful and constructive in reviews and discussions.
 
 ## Security Issues

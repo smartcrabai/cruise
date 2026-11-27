@@ -1,0 +1,8 @@
+# Command-only workflow: no SDK, model, or network. Writes and prints the input.
+command: [cat]
+create_pr: false
+steps:
+  write:
+    command: "printf '%s\n' '{input}' > verify-output.txt"
+  show:
+    command: "cat verify-output.txt"

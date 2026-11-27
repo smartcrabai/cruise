@@ -1,0 +1,17 @@
+# Option prompt answered in the terminal or the WebUI; records the choice.
+command: [cat]
+create_pr: false
+steps:
+  choose:
+    option:
+      - selector: Fast path
+        next: fast
+      - selector: Alternate path
+        next: alternate
+  fast:
+    command: "printf fast > chosen.txt"
+    next: done
+  alternate:
+    command: "printf alternate > chosen.txt"
+  done:
+    command: "cat chosen.txt"

@@ -61,6 +61,11 @@ path = "src/launcher.rs"
 name = "cruise-runtime"
 path = "src/main.rs"
 
+# PTY capture helper for the project-local verify-cruise skill.
+[[example]]
+name = "verify_pty"
+path = ".agents/skills/verify-cruise/scripts/verify_pty.rs"
+
 [features]
 jcode-bubblewrap = []
 test-utils = []
