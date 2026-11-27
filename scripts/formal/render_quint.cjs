@@ -28,8 +28,11 @@ async function render() {
     if (!meta.isFile() || total > 8 * 1024 * 1024) throw new Error('Unsafe or oversized Quint traces');
     const { states } = JSON.parse(readFileSync(path, 'utf8'));
     if (!Array.isArray(states) || !states.length || states.length > 512) throw new Error('Invalid trace length');
+    // A `.fail()` witness ends in the refused step's undefined state; draw only its valid prefix.
+    let end = states.length;
+    while (end > 1 && states[end - 1]?.diagram === undefined) end -= 1;
     let prev;
-    for (const { diagram } of states) {
+    for (const { diagram } of states.slice(0, end)) {
       const current = { state: label(diagram?.state), via: label(diagram?.via) };
       if (!nodes.has(current.state)) nodes.set(current.state, `s${nodes.size}`);
       if (prev && (current.state !== prev.state || current.via !== prev.via)) {

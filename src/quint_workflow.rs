@@ -1,4 +1,5 @@
 mod evidence;
+mod maintain;
 mod tools;
 
 use std::path::{Path, PathBuf};
@@ -16,6 +17,7 @@ use crate::session::SessionState;
 use crate::workflow::CompiledWorkflow;
 
 pub(crate) use evidence::publication_evidence;
+pub(crate) use maintain::maintain;
 pub(crate) use tools::Tools;
 
 pub(crate) const FLAG: &str = "formal_methods";

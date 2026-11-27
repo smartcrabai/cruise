@@ -10,10 +10,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::error::{CruiseError, Result};
-use crate::trusted_git::{
-    ensure_no_repository_filters, git_output, git_output_with_index, parse_oid,
-    session_artifacts_root, temporary_index_copy, valid_oid,
-};
+use crate::trusted_git::{git_output, session_artifacts_root, valid_oid, worktree_tree};
 
 /// Gate exit status that stops the step without a retry (`EX_TEMPFAIL`).
 pub(crate) const BLOCKED_EXIT_CODE: i32 = 75;
@@ -324,14 +321,6 @@ fn framework(path: &str) -> Option<&'static str> {
             .any(|prefix| name.starts_with(prefix))
             .then_some(*family)
     })
-}
-
-fn worktree_tree(cwd: &Path) -> Result<String> {
-    ensure_no_repository_filters(cwd)?;
-    let index = temporary_index_copy(cwd)?;
-    git_output_with_index(cwd, &["add", "--all"], Some(&index.path))?;
-    let output = git_output_with_index(cwd, &["write-tree"], Some(&index.path))?;
-    parse_oid("git write-tree", &output.stdout)
 }
 
 fn baseline_name(step: &str) -> Result<String> {

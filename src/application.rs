@@ -5938,7 +5938,16 @@ async fn execute_run(
     }
     refresh_run_after_execution(manager, id, setup, inputs, &mut execution);
     if let Ok(result) = &execution {
-        quint::finish_review(manager, claim, setup, result.failed, &on_start, &on_log).await?;
+        quint::finish_review(
+            manager,
+            claim,
+            setup,
+            result.failed,
+            &handlers.option,
+            &on_start,
+            &on_log,
+        )
+        .await?;
     }
     match execution {
         Err(error) => Err(error),

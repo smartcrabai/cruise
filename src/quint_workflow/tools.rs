@@ -101,7 +101,7 @@ fn run(
     Ok(format!("{stdout}{stderr}"))
 }
 
-fn self_contained(source: &[u8]) -> bool {
+pub(super) fn self_contained(source: &[u8]) -> bool {
     let mut cursor = 0;
     while let Some(&byte) = source.get(cursor) {
         match (byte, source.get(cursor + 1).copied()) {

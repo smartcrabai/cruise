@@ -44,6 +44,19 @@ fn choices() -> [OptionChoice; 3] {
     ]
 }
 
+fn update_choices() -> [OptionChoice; 2] {
+    [
+        OptionChoice::Selector {
+            label: "Approve updated Quint model".into(),
+            next: Some(APPROVE.into()),
+        },
+        OptionChoice::Selector {
+            label: "Reject and stop".into(),
+            next: Some(REJECT.into()),
+        },
+    ]
+}
+
 fn files(manager: &SessionManager, state: &SessionState) -> Result<Files> {
     Files::new(
         &state.artifacts_path(&manager.sessions_dir()),
@@ -247,6 +260,7 @@ pub(super) async fn finish_review(
     claim: &OperationClaim,
     setup: &mut RunSetup,
     failed: usize,
+    option: &RuntimeOptionHandler,
     on_start: &(dyn Fn(&str) -> Result<()> + Sync),
     on_log: &crate::step::command::StepLogCallback<'_>,
 ) -> Result<()> {
@@ -284,7 +298,6 @@ pub(super) async fn finish_review(
             finalizing: true,
         },
     )?;
-    on_start("quint-final")?;
     let agent = Agent {
         workflow: &setup.compiled,
         workspace: setup.workspace.path(),
@@ -292,6 +305,43 @@ pub(super) async fn finish_review(
         session: claim.session_id(),
         retries: setup.rate_limit_retries,
     };
+    // Covered repository models must describe the code before the final check fingerprints it.
+    let base =
+        crate::branch_diff::session_base_commit(&setup.state).unwrap_or_else(|_| "HEAD".to_owned());
+    let token = claim.token.clone();
+    let approve = move |image: Image| -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>,
+    > {
+        let token = token.clone();
+        Box::pin(async move {
+            let response = option
+                .select_with_image(
+                    &update_choices(),
+                    Some("Approve the updated repository Quint model before publication."),
+                    Some(&token),
+                    Some(image),
+                )
+                .await?;
+            match response.next_step.as_deref() {
+                Some(APPROVE) => Ok(true),
+                Some(REJECT) => Ok(false),
+                _ => Err(error("Invalid Quint review decision")),
+            }
+        })
+    };
+    crate::retry::with_active_policy(
+        setup.retry_policy.clone(),
+        crate::quint_workflow::maintain(
+            &agent,
+            &Tools::load()?,
+            &setup.state.artifacts_path(&manager.sessions_dir()),
+            &base,
+            &approve,
+            on_log,
+        ),
+    )
+    .await?;
+    on_start("quint-final")?;
     let receipt = crate::retry::with_active_policy(
         setup.retry_policy.clone(),
         agent.finish(&files, &preview),

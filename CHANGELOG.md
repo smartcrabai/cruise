@@ -36,6 +36,7 @@
 
 ### Added
 
+- Keep repository Quint models in step with the code. With `formal_methods`, a run that changes code covered by `.cruise/formal-coverage.toml` checks each covered model before final verification: an agent classifies the changes and may edit only the model and the coverage file; an updated model must pass, fail on a scratch break, and get PNG approval; a code bug stops the run before the PR. Only `in sync` or approved models move their `sync` commit.
 - Opt into a single read-only second opinion after implementation in `builtin:tdd` with `-f advisor` (jcode only). Set `advisor_model` in the workflow or `default.yaml`, or override it with `CRUISE_ADVISOR_MODEL`. The normal model checks fresh advice and applies only confirmed defects within the approved plan, without a second review.
 - Add `stop_exit_codes` to quality gates. A listed gate exit code stops the step with `QualityGateStopped` and the gate output as the failure reason, without retry feedback or `if.fail`; resuming reruns the prompt step.
 - Keep UI E2E screenshots and reports after worktree cleanup. When a worktree or `--repo` clone session completes, Cruise copies untracked/ignored `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.md`, `.txt`, and `.log` files (5 MiB per file, 25 MiB and 100 files per session, images first) into `sessions/<id>/artifacts/evidence/` and lists saved and skipped files in `artifacts/evidence.md`, shown in the run log, the WebUI **Info** tab, and `cruise list`. Evidence stays local and is not added to the PR.

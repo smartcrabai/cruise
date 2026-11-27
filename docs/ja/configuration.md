@@ -84,6 +84,17 @@ npm install --prefix "${XDG_DATA_HOME:-$HOME/.local/share}/cruise/quint-tools" -
 
 Windows で `XDG_DATA_HOME` が未設定なら `%LOCALAPPDATA%/cruise/data/quint-tools` を使用します。`flags.formal_methods.quint_review: true` は eject 後の YAML と新規 snapshot にも残ります。承認はスキップ不可。開始後の flag 変更にはリセットが必要です。図は成功したテストに由来し、全状態探索ではありません。plan の **Verify** と `builtin:add-formal-specs` は従来どおりです。
 
+**リポジトリのモデルを追従させる。** `.cruise/formal-coverage.toml` には、リポジトリの Quint モデル、それが表すコード（`covers` の glob）、最後に一致を確かめた commit（`sync`）を書きます:
+
+```toml
+[[model]]
+path = "tests/formal/premise_gate.qnt"
+covers = ["src/premise.rs", "builtin/tdd.yaml"]
+sync = "<完全な commit SHA>"
+```
+
+`formal_methods` の実行が対象のコードを変更すると、Cruise は最終検証の前にそのモデルを確認します。まず今のままモデルを実行し、次に agent が対象の変更をそれぞれ分類（`no effect`、`shape changed`、`promise changed`、`promise maybe broken`）し、そのモデルと coverage ファイルだけを編集できます。ほかの編集があれば実行を止めます。性質を変えてよいのは、根拠を示した意図的な約束の変更だけです。変更がなく成功するモデルは `in sync` です。更新したモデルは成功し、agent の 1 行の scratch break では失敗し、新しい PNG を同じ CLI/WebUI の review で承認される必要があります。失敗はコードに沿って再生し、すべての手順が起こり得るなら PR の前に反例を示して止めます（コードの不具合）。そうでなければモデルのずれとして最大 2 回まで直します。`sync` が確認した `HEAD` に進むのは `in sync` か承認済みのモデルだけで、PR/MR の証跡に一覧されます。モデルは import のない単体である必要があります。
+
 <a id="config-file-reference"></a>
 ## 設定ファイルのリファレンス
 
