@@ -40,7 +40,7 @@ steps:
 
 top-level `flags:` で flag を宣言し、step の `flag: <name>` で結び付けます。flag が `on` の場合に限り対象 step が実行され、`off` では skip されます。
 
-- **設定可能な対象:** 通常 step、group call site、`workflow_call` call site（展開された全 step に適用）、`parallel` parent、`after-pr` 内の step。group 定義内の step、呼び出された workflow 独自の step、parallel child には `flag:` を設定できません。
+- **設定可能な対象:** 通常 step、group call site、`workflow_call` call site（展開された全 step に適用）、`parallel` parent、`after-pr` 内の step。group 定義内では、call site に `flag:` がない group の中間の step（最初と最後以外）にだけ `flag:` を設定できます。呼び出された workflow 独自の step と parallel child には設定できません。
 - **既定は off:** 宣言済み flag は値がない場合すべて off です。
 - **値の指定:** `--flag NAME` は1つの flag を有効化します。`--flag NAME1,NAME2` は comma 区切りの複数選択を有効化し、`--flag` option は繰り返し指定できます。`NAME=on|off|true|false` を明示すると個別値を設定／解除できます。`cruise run` は保存済み値と CLI override を使い、prompt は表示しません。flag が宣言されていて `-f/--flag` がない TTY では `cruise exec` と `force_exec` entry point が prompt を表示します。ただし dry-run は除きます（[Workflow flag](cli-reference.md#cruise-run)参照）。未知の名前は拒否されます。
 - **Resume:** 保存済み session 値は維持され、指定された `--flag` は名前が一致する flag のみ上書きします。
@@ -262,7 +262,7 @@ steps:
 - group call site には `output_file` も指定できません。内側の prompt step を使うよう専用 error が案内します。
 - group call site には `computer_use` を指定できません。内側の prompt step に設定してください。
 - group 定義内の step に `workflow_call:` を指定できません。呼び出す workflow は top-level で展開してください。
-- group 定義内の step に `flag:` を指定できません。group call site に flag を指定してください。
+- `flag:` を指定できるのは group 定義の中間の step（最初と最後以外）だけで、group call site に flag がない場合に限ります。それ以外は group call site に flag を指定してください。
 
 <a id="workflow-composition-workflow_call"></a>
 ## Workflow composition (`workflow_call`)

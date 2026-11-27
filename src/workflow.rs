@@ -391,10 +391,14 @@ fn expand_steps(
                          which is not allowed inside group steps"
                     )));
                 }
-                if sub_step.flag.is_some() {
+                // A flagged inner step is skipped like any flagged step; the group's entry
+                // and exit stay unconditional so its retry edges keep their endpoints.
+                if sub_step.flag.is_some()
+                    && (step.flag.is_some() || sub_name == first_sub || sub_name == last_sub)
+                {
                     return Err(crate::error::CruiseError::InvalidStepConfig(format!(
-                        "group step '{group_name}/{sub_name}' has a 'flag', which is not allowed \
-                         inside group steps; put the flag on the group call instead"
+                        "group step '{group_name}/{sub_name}' has a 'flag'; inner flags are allowed only \
+                         on middle steps of a group whose call has no flag"
                     )));
                 }
 
@@ -406,7 +410,9 @@ fn expand_steps(
                 }
                 step_to_invocation.insert(key.clone(), step_name.clone());
                 let mut sub = sub_step.clone();
-                sub.flag.clone_from(&step.flag);
+                if step.flag.is_some() {
+                    sub.flag.clone_from(&step.flag);
+                }
                 flat.insert(key, sub);
             }
 

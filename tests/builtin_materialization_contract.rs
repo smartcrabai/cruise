@@ -619,13 +619,41 @@ fn assert_builtin_e2e_contract(project: &Path) {
             name == "refactor",
             "{name} E2E order"
         );
-        for &index in &review_positions {
-            let id = step_ids[index].to_string();
-            assert!(
-                !off.contains(&id) && !on.contains(&id),
-                "{name} review step {id} was gated"
-            );
-        }
+        assert_review_gating(name, &compiled, &step_ids, &review_positions, &off, &on);
+    }
+}
+
+/// Review steps run whatever `e2e` is; only the TDD reproduce gate follows `interrogate`.
+fn assert_review_gating(
+    name: &str,
+    compiled: &CompiledWorkflow,
+    step_ids: &[&str],
+    review_positions: &[usize],
+    off: &[String],
+    on: &[String],
+) {
+    let interrogate = [
+        "verify-review-pass/reproduce-baseline",
+        "verify-review-pass/reproduce",
+        "verify-review-pass/reproduce-filter",
+    ];
+    let with_interrogate = flags::preflight_skips(
+        compiled,
+        &[("interrogate".to_string(), true)].into_iter().collect(),
+        &[],
+    );
+    for &index in review_positions {
+        let id = step_ids[index].to_string();
+        let gated = name == "tdd" && interrogate.contains(&id.as_str());
+        assert_eq!(
+            off.contains(&id) && on.contains(&id),
+            gated,
+            "{name} review step {id} gating"
+        );
+        assert!(
+            !with_interrogate.contains(&id),
+            "{name} {id} stays off with interrogate"
+        );
     }
 }
 

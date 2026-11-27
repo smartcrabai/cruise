@@ -49,6 +49,7 @@ pub mod i18n;
 mod install_identity;
 mod instant_exec;
 pub mod instruction_inbox;
+mod interrogate;
 pub(crate) mod issue_images;
 pub(crate) mod issue_input;
 pub mod issue_publish;

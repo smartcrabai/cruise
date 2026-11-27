@@ -248,6 +248,64 @@ steps:
 }
 
 #[test]
+fn group_inner_flag_is_allowed_only_on_middle_steps_of_an_unflagged_call() {
+    let group = "command: [echo]
+flags:
+  extra: {}
+groups:
+  review:
+    steps:
+      first:
+        command: 'true'
+      middle:
+        flag: extra
+        command: 'true'
+      last:
+        command: 'true'
+steps:
+  run:
+    group: review
+";
+    validate_config(&parse(group)).unwrap();
+    compile(parse(group)).unwrap();
+    let flagged_call = group.replace(
+        "    group: review\n",
+        "    group: review\n    flag: extra\n",
+    );
+    assert!(compile(parse(&flagged_call)).is_err());
+}
+
+#[tokio::test]
+async fn group_inner_flag_skips_only_that_step_each_round() {
+    let yaml = "command: [echo]
+flags:
+  extra: {}
+groups:
+  review:
+    steps:
+      one:
+        command: printf 1 >> trace.txt
+      two:
+        flag: extra
+        command: printf 2 >> trace.txt
+      three:
+        command: printf 3 >> trace.txt
+steps:
+  run:
+    group: review
+";
+    for (enabled, trace) in [(false, "13"), (true, "123")] {
+        let dir = tempfile::tempdir().unwrap();
+        let r = run(dir.path(), yaml, &values(&[("extra", enabled)]), None).await;
+        r.result.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("trace.txt")).unwrap(),
+            trace
+        );
+    }
+}
+
+#[test]
 fn validation_rejects_flag_on_parallel_child() {
     let message = invalid(
         "command: [echo]\nflags:\n  e2e: {}\nsteps:\n  fan:\n    flag: e2e\n    parallel:\n      one:\n        flag: e2e\n        command: 'true'\n      two:\n        command: 'true'\n",
