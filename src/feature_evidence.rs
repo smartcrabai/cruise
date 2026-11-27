@@ -127,7 +127,7 @@ fn find_skill(cwd: &Path) -> Result<String> {
         [skill] => skill
             .parent()
             .and_then(|dir| dir.strip_prefix(cwd).ok())
-            .map(|dir| dir.to_string_lossy().into_owned())
+            .map(slash_path)
             .ok_or_else(|| evidence_error("verification skill path is outside the workspace")),
         _ => Err(evidence_error(
             "several `.agents/skills/verify-*/` skills; keep one per repository",
@@ -162,14 +162,19 @@ fn features(cwd: &Path, skill: &str) -> Result<Vec<(Feature, Vec<String>)>> {
                     .collect()
             })
             .unwrap_or_default();
-        let file = path
-            .strip_prefix(cwd)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let file = path.strip_prefix(cwd).map(slash_path).unwrap_or_default();
         out.push((Feature { id: stem, file }, covers));
     }
     out.sort_by(|(a, _), (b, _)| a.id.cmp(&b.id));
     Ok(out)
+}
+
+/// Repository-relative path with `/` separators, as Git reports paths.
+fn slash_path(path: &Path) -> String {
+    path.components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn covers_path(cover: &str, path: &str) -> bool {
