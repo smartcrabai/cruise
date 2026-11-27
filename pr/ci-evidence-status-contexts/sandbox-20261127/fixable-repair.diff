@@ -1,0 +1,21 @@
+commit bb492b48c65c0fc589ecbe8ed6e8db01316b9828
+Author: Takumi Mori <51111242+takumi3488@users.noreply.github.com>
+Date:   Fri Nov 27 08:01:37 2026 +0000
+
+    Fix verified CI failure
+
+diff --git a/README.md b/README.md
+index 6c78a31..c25f4c0 100644
+--- a/README.md
++++ b/README.md
+@@ -19,3 +19,10 @@ options:
+   --repeat REPEAT      print the greeting N times
+ ```
+ <!-- usage:end -->
++
++## Examples
++
++```sh
++python3 src/greet.py Ada --greeting Hi
++python3 src/greet.py Ada --repeat 3
++```

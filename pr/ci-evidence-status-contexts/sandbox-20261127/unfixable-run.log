@@ -1,0 +1,18 @@
+> follow-up/pr-ready
+> follow-up/sync-base
+> follow-up/push-after-sync
+> follow-up/wait-ci
+  stderr: GitHub CI failed for PR #5: expected HEAD 09aefbdc431ae0fc4d50026c8210e24c52b9401d, PR HEAD 09aefbdc431ae0fc4d50026c8210e24c52b9401d, rollup HEAD 09aefbdc431ae0fc4d50026c8210e24c52b9401d, state FAILURE, checks 4.
+> follow-up/rerun-unacquired-ci
+> follow-up/ci-premise-check
+> follow-up/fix-ci-error
+  {"action":"commit"}
+> follow-up/finish-ci-fix
+> follow-up/wait-ci
+  stderr: GitHub CI failed for PR #5: expected HEAD 1f54191f453363491a04e9d5093ce3dc0a5f3050, PR HEAD 1f54191f453363491a04e9d5093ce3dc0a5f3050, rollup HEAD 1f54191f453363491a04e9d5093ce3dc0a5f3050, state FAILURE, checks 4.
+> follow-up/rerun-unacquired-ci
+> follow-up/ci-premise-check
+> follow-up/fix-ci-error
+  {"action":"wait"}
+> follow-up/finish-ci-fix
+  stderr: Error: CI remains unresolved: external check(s) `deploy/preview` failed on head 1f54191f453363491a04e9d5093ce3dc0a5f3050; the host cannot read their logs or rerun them, so fix the cause or rerun them in their CI service, then run the session again; refusing to continue to native merge

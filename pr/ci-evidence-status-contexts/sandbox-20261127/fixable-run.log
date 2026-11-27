@@ -1,0 +1,12 @@
+  -> follow-up/ci-premise-check -> follow-up/fix-ci-error [next] (edge 2/3)
+
+> follow-up/fix-ci-error
+  Warning: Fallback: Bubblewrap isolation unavailable; running without isolation
+  Model: openai/gpt-6.2-sol:low
+  {"action":"commit"}
+  v 14.6s
+  -> follow-up/fix-ci-error -> follow-up/finish-ci-fix [next] (edge 2/3)
+
+> follow-up/finish-ci-fix
+  stderr: Warning: skipping host verification of the CI repair (requires Bubblewrap and CRUISE_CI_VERIFY_SCRIPT); CI verifies the pushed head
+  v 5.3s
