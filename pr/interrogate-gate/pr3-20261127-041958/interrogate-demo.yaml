@@ -1,0 +1,71 @@
+# The TDD reproduce gate with stand-ins for consolidate, the reproduce agent, and apply.
+# Every host step is the real internal command builtin:tdd runs.
+command: [cat]
+create_pr: false
+flags:
+  interrogate:
+    description: Apply only behavioral review findings whose command reproduces the failure
+groups:
+  review:
+    steps:
+      consolidate:
+        command: |-
+          A="$(dirname '{plan}')/artifacts"; mkdir -p "$A/analysis"
+          cat > "$A/analysis/worklist.md" <<'WL'
+          # Consolidated Findings
+
+          ## Worklist
+
+          ### W1 | major | src/counter.sh:4
+          - contributing findings: REV-1
+          - repro: `sh src/check-limit.sh`
+          - exact minimal change: refuse above the limit
+          - verification owed: sh src/check-limit.sh
+
+          ### W2 | minor | src/counter.sh:2
+          - contributing findings: PLAN-1
+          - repro: `test -f src/counter.sh`
+          - exact minimal change: add the missing counter file
+          - verification owed: test -f src/counter.sh
+
+          ### W3 | minor | src/counter.sh:1
+          - contributing findings: SIMP-1
+          - repro: none
+          - exact minimal change: drop the unused variable
+          - verification owed: sh -n src/counter.sh
+
+          ### W4 | major | src/server.sh:1
+          - contributing findings: WIRE-1
+          - repro: `no-such-runtime --check`
+          - exact minimal change: register the handler
+          - verification owed: no-such-runtime --check
+
+          ## Dropped
+
+          - none
+
+          ## Unavailable sources
+
+          - none
+          WL
+      reproduce-baseline:
+        flag: interrogate
+        command: "{cruise.bin} internal interrogate-baseline"
+        accepted_exit_codes: [0]
+        env:
+          CRUISE_INTERROGATE_PLAN: '{plan}'
+      reproduce:
+        flag: interrogate
+        command: "sh ../reproduce.sh '{plan}'"
+      reproduce-filter:
+        flag: interrogate
+        command: "{cruise.bin} internal interrogate-filter"
+        accepted_exit_codes: [0]
+        env:
+          CRUISE_INTERROGATE_PLAN: '{plan}'
+      apply:
+        command: |-
+          echo "--- worklist apply receives ---"; cat "$(dirname '{plan}')/artifacts/analysis/worklist.md"
+steps:
+  review-pass:
+    group: review

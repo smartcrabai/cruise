@@ -1,0 +1,43 @@
+-> current branch: /private/var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/verify-cruise.MUHlnb/repo
+
+> review-pass/consolidate
+  v 0.0s
+  -> review-pass/consolidate -> review-pass/reproduce-baseline [sequential] (edge 1/3)
+→ skipping: review-pass/reproduce-baseline (flag 'interrogate' is off)
+  -> review-pass/reproduce-baseline -> review-pass/reproduce [skip] (edge 0/3)
+→ skipping: review-pass/reproduce (flag 'interrogate' is off)
+  -> review-pass/reproduce -> review-pass/reproduce-filter [skip] (edge 0/3)
+→ skipping: review-pass/reproduce-filter (flag 'interrogate' is off)
+  -> review-pass/reproduce-filter -> review-pass/apply [skip] (edge 0/3)
+
+> review-pass/apply
+  --- worklist apply receives ---
+  # Consolidated Findings
+  ## Worklist
+  ### W1 | major | src/counter.sh:4
+  - contributing findings: REV-1
+  - repro: `sh src/check-limit.sh`
+  - exact minimal change: refuse above the limit
+  - verification owed: sh src/check-limit.sh
+  ### W2 | minor | src/counter.sh:2
+  - contributing findings: PLAN-1
+  - repro: `test -f src/counter.sh`
+  - exact minimal change: add the missing counter file
+  - verification owed: test -f src/counter.sh
+  ### W3 | minor | src/counter.sh:1
+  - contributing findings: SIMP-1
+  - repro: none
+  - exact minimal change: drop the unused variable
+  - verification owed: sh -n src/counter.sh
+  ### W4 | major | src/server.sh:1
+  - contributing findings: WIRE-1
+  - repro: `no-such-runtime --check`
+  - exact minimal change: register the handler
+  - verification owed: no-such-runtime --check
+  ## Dropped
+  - none
+  ## Unavailable sources
+  - none
+  v 0.0s
+
+v workflow complete (2 run, 3 skipped, 0 failed) [0.0s]

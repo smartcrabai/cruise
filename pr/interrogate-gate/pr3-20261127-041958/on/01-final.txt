@@ -1,0 +1,58 @@
+-> current branch: /private/var/folders/yt/jkgjjlb55fvbjsx8t5xw72280000gn/T/verify-cruise.MUHlnb/repo
+
+> review-pass/consolidate
+  v 0.0s
+  -> review-pass/consolidate -> review-pass/reproduce-baseline [sequential] (edge 1/3)
+
+> review-pass/reproduce-baseline
+  v 0.0s
+  -> review-pass/reproduce-baseline -> review-pass/reproduce [sequential] (edge 1/3)
+
+> review-pass/reproduce
+  ### W1
+  - command: `sh src/check-limit.sh`
+  - exit: 1
+  - observed: counter has no limit
+  - verdict: reproduced
+  ### W2
+  - command: `test -f src/counter.sh`
+  - exit: 0
+  - observed: 
+  - verdict: not-reproduced
+  ### W4
+  - command: `no-such-runtime --check`
+  - exit: 127
+  - observed: sh: no-such-runtime: command not found
+  - verdict: blocked
+  v 0.0s
+  -> review-pass/reproduce -> review-pass/reproduce-filter [sequential] (edge 1/3)
+
+> review-pass/reproduce-filter
+  Reproduction kept 2 of 4 worklist items (1 not reproduced, 1 blocked).
+  v 0.1s
+  -> review-pass/reproduce-filter -> review-pass/apply [sequential] (edge 1/3)
+
+> review-pass/apply
+  --- worklist apply receives ---
+  # Consolidated Findings
+  ## Worklist
+  ### W1 | major | src/counter.sh:4
+  - contributing findings: REV-1
+  - repro: `sh src/check-limit.sh`
+  - exact minimal change: refuse above the limit
+  - verification owed: sh src/check-limit.sh
+  ### W3 | minor | src/counter.sh:1
+  - contributing findings: SIMP-1
+  - repro: none
+  - exact minimal change: drop the unused variable
+  - verification owed: sh -n src/counter.sh
+  ## Dropped
+  - `PLAN-1` - reason: not reproduced - W2 (the command did not show the failure)
+  ## Unavailable sources
+  - none
+  ## Blocked by reproduction
+  Do not edit these; record every contributing ID as `persists` with the blocker:
+  - W4 (WIRE-1) - sh: no-such-runtime: command not found
+  v 0.0s
+
+v workflow complete (5 run, 0 skipped, 0 failed) [0.2s]
