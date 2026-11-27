@@ -129,10 +129,15 @@ fn render(worklist: &Worklist, verdicts: &BTreeMap<String, (Verdict, String)>) -
             Verdict::Reproduced => {}
             Verdict::NotReproduced => {
                 not_reproduced += 1;
+                let detail = if observed.is_empty() {
+                    "the command did not show the failure"
+                } else {
+                    observed
+                };
                 for source in &item.sources {
                     let _ = writeln!(
                         dropped,
-                        "- `{source}` - reason: not reproduced - {} ({observed})",
+                        "- `{source}` - reason: not reproduced - {} ({detail})",
                         item.id
                     );
                 }
@@ -153,7 +158,19 @@ fn render(worklist: &Worklist, verdicts: &BTreeMap<String, (Verdict, String)>) -
         out.push_str(rest);
         out.push('\n');
     } else if let Some(after) = rest.strip_prefix("## Dropped") {
-        let _ = write!(out, "## Dropped\n\n{dropped}{after}\n");
+        // A `- none` placeholder no longer holds once items were dropped here.
+        let (existing, tail) = after
+            .split_once("\n## ")
+            .map_or((after, ""), |(a, t)| (a, t));
+        let existing: String = existing
+            .lines()
+            .filter(|line| !line.trim().is_empty() && line.trim() != "- none")
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let _ = write!(out, "## Dropped\n\n{existing}{dropped}");
+        if !tail.is_empty() {
+            let _ = write!(out, "\n## {tail}\n");
+        }
     } else {
         let _ = write!(out, "## Dropped\n\n{dropped}\n{rest}\n");
     }
