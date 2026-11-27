@@ -19,7 +19,7 @@ use serde::Deserialize;
 use super::{Agent, Image, MAX_PNG, MODEL_LIMIT, Tools, error, sha256, tools};
 use crate::artifacts;
 use crate::error::{CruiseError, Result};
-use crate::trusted_git::{git_output, worktree_tree};
+use crate::trusted_git::{changed_paths, diff_paths, git_output, worktree_tree};
 
 pub(crate) const COVERAGE: &str = ".cruise/formal-coverage.toml";
 const REPORT: &str = "formal-drift/report.md";
@@ -123,25 +123,6 @@ fn load(workspace: &Path) -> Result<Option<Coverage>> {
     Ok(Some(coverage))
 }
 
-/// Paths the task changed relative to `base` (tracked and untracked).
-fn changed_paths(workspace: &Path, base: &str) -> Result<BTreeSet<String>> {
-    let mut paths = BTreeSet::new();
-    for args in [
-        &["diff", "--name-only", "-z", "--no-renames", base, "--"][..],
-        &["ls-files", "--others", "--exclude-standard", "-z"],
-    ] {
-        let output = git_output(workspace, args)?;
-        paths.extend(
-            output
-                .stdout
-                .split(|byte| *byte == 0)
-                .filter(|path| !path.is_empty())
-                .map(|path| String::from_utf8_lossy(path).into_owned()),
-        );
-    }
-    Ok(paths)
-}
-
 /// Whether a code change (not the model or coverage record itself) hits `entry`.
 fn covered(entry: &Entry, changed: &BTreeSet<String>) -> Vec<String> {
     let options = glob::MatchOptions {
@@ -159,19 +140,6 @@ fn covered(entry: &Entry, changed: &BTreeSet<String>) -> Vec<String> {
         })
         .cloned()
         .collect()
-}
-
-fn diff_paths(workspace: &Path, before: &str, after: &str) -> Result<Vec<String>> {
-    let output = git_output(
-        workspace,
-        &["diff", "--name-only", "-z", "--no-renames", before, after],
-    )?;
-    Ok(output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .map(|path| String::from_utf8_lossy(path).into_owned())
-        .collect())
 }
 
 fn validate(update: &Maintained) -> std::result::Result<(), String> {

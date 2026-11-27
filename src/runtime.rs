@@ -1,9 +1,9 @@
 use crate::{
     app_config, backend, ci_followup, clean_cmd, cli, config_cmd, daemon, diff_cmd, docs_cmd,
-    draft_cmd, e2e_guard, error, exec_cmd, host_sync, i18n, interrogate, ledger_snapshot, list_cmd,
-    manager_cmd, plan_cmd, platform, premise, provider_install, run_cmd, ssh_cmd, telemetry,
-    tell_cmd, tool_policy, update_cmd, usage_cmd, workflow_cmd, workflow_doctor, workflow_generate,
-    workflow_make, worktree_pr,
+    draft_cmd, e2e_guard, error, exec_cmd, feature_evidence, host_sync, i18n, interrogate,
+    ledger_snapshot, list_cmd, manager_cmd, plan_cmd, platform, premise, provider_install, run_cmd,
+    ssh_cmd, telemetry, tell_cmd, tool_policy, update_cmd, usage_cmd, workflow_cmd,
+    workflow_doctor, workflow_generate, workflow_make, worktree_pr,
 };
 
 // Hooks run once per tool call, without constructing a runtime or telemetry.
@@ -332,6 +332,71 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
             let summary = interrogate::filter(
                 &std::env::current_dir()?,
                 &path_from_env("CRUISE_INTERROGATE_PLAN")?,
+            )?;
+            println!("{summary}");
+            Ok(())
+        }
+        Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::EvidencePrepare,
+        })) => {
+            // Exit 1 means "drive owed"; failures use 2 so a workflow cannot mistake them for it.
+            let owed = feature_evidence::prepare(
+                &std::env::current_dir()?,
+                &path_from_env("CRUISE_EVIDENCE_PLAN")?,
+            )
+            .unwrap_or_else(|error| {
+                eprintln!("{error}");
+                std::process::exit(2);
+            });
+            println!(
+                "{}",
+                if owed {
+                    "Feature evidence is owed for this change."
+                } else {
+                    "No mapped feature is touched; nothing to drive."
+                }
+            );
+            if owed {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::EvidenceValidate,
+        })) => {
+            let summary = feature_evidence::validate(
+                &std::env::current_dir()?,
+                &path_from_env("CRUISE_EVIDENCE_PLAN")?,
+            )?;
+            println!("{summary}");
+            Ok(())
+        }
+        Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::EvidenceRefreshCheck,
+        })) => {
+            let owed = feature_evidence::refresh_check(
+                &std::env::current_dir()?,
+                &path_from_env("CRUISE_EVIDENCE_PLAN")?,
+                &text_from_env("CRUISE_AFTER_PR_URL")?,
+            )
+            .unwrap_or_else(|error| {
+                eprintln!("{error}");
+                std::process::exit(2);
+            });
+            if owed {
+                println!("The workspace moved past the published evidence; refreshing it.");
+                std::process::exit(1);
+            }
+            println!("Published feature evidence is current.");
+            Ok(())
+        }
+        Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::EvidenceRepublish,
+        })) => {
+            let summary = feature_evidence::republish(
+                &std::env::current_dir()?,
+                &path_from_env("CRUISE_EVIDENCE_PLAN")?,
+                &text_from_env("CRUISE_AFTER_PR_URL")?,
             )?;
             println!("{summary}");
             Ok(())

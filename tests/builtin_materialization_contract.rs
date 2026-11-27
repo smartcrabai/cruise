@@ -178,10 +178,32 @@ fn assert_native_merge_resyncs_to_sync_base(compiled: &CompiledWorkflow) {
     }
 }
 
+const EVIDENCE_REFRESH_IDS: [&str; 3] = [
+    "evidence-refresh-check",
+    "evidence-refresh",
+    "evidence-republish",
+];
+
+/// tdd refreshes feature evidence right before the merge; only the `evidence` flag gates it.
+fn strip_evidence_refresh(compiled: &mut CompiledWorkflow) {
+    let keys: Vec<_> = compiled.after_pr.keys().cloned().collect();
+    let Some(start) = keys.iter().position(|id| id == EVIDENCE_REFRESH_IDS[0]) else {
+        return;
+    };
+    assert_eq!(&keys[start..start + 3], EVIDENCE_REFRESH_IDS);
+    assert_eq!(keys[start + 3], "squash-merge");
+    for id in EVIDENCE_REFRESH_IDS {
+        let flag = compiled.after_pr[id].flag.as_ref().unwrap();
+        assert_eq!(flag.as_slice(), ["evidence"], "{id}");
+        compiled.after_pr.shift_remove(id);
+    }
+}
+
 fn assert_after_pr_contract(config: WorkflowConfig) {
     validate_config(&config).unwrap();
-    let compiled = compile(config).unwrap();
+    let mut compiled = compile(config).unwrap();
     assert_native_merge_resyncs_to_sync_base(&compiled);
+    strip_evidence_refresh(&mut compiled);
     let ids: Vec<_> = compiled.after_pr.keys().map(String::as_str).collect();
     assert_eq!(ids, AFTER_PR_IDS);
     assert!(

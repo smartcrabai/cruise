@@ -98,6 +98,35 @@ pub(crate) fn worktree_tree(cwd: &Path) -> Result<String> {
     parse_oid("git write-tree", &output.stdout)
 }
 
+/// Paths changed relative to `base` in the working tree, plus untracked files.
+pub(crate) fn changed_paths(cwd: &Path, base: &str) -> Result<std::collections::BTreeSet<String>> {
+    let mut paths = std::collections::BTreeSet::new();
+    for args in [
+        &["diff", "--name-only", "-z", "--no-renames", base, "--"][..],
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    ] {
+        paths.extend(nul_paths(&git_output(cwd, args)?.stdout));
+    }
+    Ok(paths)
+}
+
+/// Paths that differ between two trees or commits.
+pub(crate) fn diff_paths(cwd: &Path, before: &str, after: &str) -> Result<Vec<String>> {
+    let output = git_output(
+        cwd,
+        &["diff", "--name-only", "-z", "--no-renames", before, after],
+    )?;
+    Ok(nul_paths(&output.stdout))
+}
+
+fn nul_paths(stdout: &[u8]) -> Vec<String> {
+    stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect()
+}
+
 pub(crate) fn parse_git_path(cwd: &Path, stdout: &[u8]) -> Result<PathBuf> {
     let value = stdout.strip_suffix(b"\n").unwrap_or(stdout);
     let value = value.strip_suffix(b"\r").unwrap_or(value);

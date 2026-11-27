@@ -36,6 +36,7 @@ pub mod error;
 pub mod evidence;
 mod exec_cmd;
 pub mod executor;
+mod feature_evidence;
 pub mod file_tracker;
 pub mod flags;
 pub(crate) mod forge;
