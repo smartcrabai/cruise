@@ -13,7 +13,7 @@ cruise resolves the workflow config as follows:
 
    | Name | Description |
    |------|-------------|
-   | `tdd` | Test-first implementation followed by a parallel analyze → consolidate → apply verification group and the PR workflow |
+   | `tdd` | Test-first implementation followed by a parallel analyze → consolidate → apply verification group (with a read-only premise step after two failed fixes for one finding) and the PR workflow |
    | `refactor` | Diff-first code, test, and structure improvements with verification |
    | `add-tests` | Audit behavior and user-flow coverage, add meaningful tests and CI, then independently verify and repair gaps |
    | `add-formal-specs` | Add executable Quint, Alloy, and Gherkin specs with CI; fix real spec/source defects |

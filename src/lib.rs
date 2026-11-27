@@ -74,6 +74,7 @@ pub mod planning;
 pub mod pr_merge;
 pub mod pr_review_fix;
 mod pr_template;
+mod premise;
 pub mod prompt_render;
 pub mod provider_install;
 pub mod quality_gate;

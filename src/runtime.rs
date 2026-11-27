@@ -1,9 +1,9 @@
 use crate::{
     app_config, backend, ci_followup, clean_cmd, cli, config_cmd, daemon, diff_cmd, docs_cmd,
     draft_cmd, e2e_guard, error, exec_cmd, host_sync, i18n, ledger_snapshot, list_cmd, manager_cmd,
-    plan_cmd, platform, provider_install, run_cmd, ssh_cmd, telemetry, tell_cmd, tool_policy,
-    update_cmd, usage_cmd, workflow_cmd, workflow_doctor, workflow_generate, workflow_make,
-    worktree_pr,
+    plan_cmd, platform, premise, provider_install, run_cmd, ssh_cmd, telemetry, tell_cmd,
+    tool_policy, update_cmd, usage_cmd, workflow_cmd, workflow_doctor, workflow_generate,
+    workflow_make, worktree_pr,
 };
 
 // Hooks run once per tool call, without constructing a runtime or telemetry.
@@ -286,6 +286,40 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
             &text_from_env("CRUISE_AFTER_PR_URL")?,
             app_config::AppConfig::load_runtime()?.ci_unacquired_rerun_max_attempts,
         ),
+        Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::PremiseCheck { repair },
+        })) => {
+            if premise::check(
+                &std::env::current_dir()?,
+                &path_from_env("CRUISE_PREMISE_PLAN")?,
+                repair,
+            )? {
+                println!("A premise step is owed before the next fix.");
+                std::process::exit(1);
+            }
+            println!("No premise is owed for this fix.");
+            Ok(())
+        }
+        Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::PremiseRecord { repair },
+        })) => match premise::record(
+            &std::env::current_dir()?,
+            &path_from_env("CRUISE_PREMISE_PLAN")?,
+            repair,
+        )? {
+            premise::Recorded::Accepted => Ok(()),
+            premise::Recorded::Incomplete(message) => {
+                print!("{message}");
+                std::process::exit(1);
+            }
+            premise::Recorded::Stop(message) => {
+                print!("{message}");
+                std::process::exit(premise::STOP_EXIT_CODE);
+            }
+        },
+        Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::PremiseCiPassed,
+        })) => premise::ci_passed(&path_from_env("CRUISE_AFTER_PR_PLAN")?),
         Some(cli::Commands::Internal(cli::InternalArgs {
             command: cli::InternalCommand::JcodePreTool,
         })) => unreachable!("jcode pre-tool gate exits before runtime initialization"),

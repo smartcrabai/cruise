@@ -33,15 +33,18 @@ use cruise::workflow_cmd::eject_builtin;
 use cruise::workflow_defaults::WorkflowDefaults;
 
 const WORKER_PHASE: &str = "BUILTIN_MATERIALIZATION_TEST_PHASE";
-const AFTER_PR_IDS: [&str; 9] = [
+const AFTER_PR_IDS: [&str; 12] = [
     "follow-up/pr-ready",
     "follow-up/sync-base",
     "follow-up/resolve-conflict",
     "follow-up/push-after-sync",
     "follow-up/finish-ci-fix",
+    "follow-up/ci-premise-check",
+    "follow-up/ci-premise",
+    "follow-up/ci-premise-record",
+    "follow-up/fix-ci-error",
     "follow-up/wait-ci",
     "follow-up/rerun-unacquired-ci",
-    "follow-up/fix-ci-error",
     "squash-merge",
 ];
 const MAX_RETRIES: usize = 3;
@@ -188,7 +191,7 @@ fn assert_after_pr_contract(config: WorkflowConfig) {
             .all(|step| step.squash_merge.is_none())
     );
     for (index, step) in compiled.after_pr.values().enumerate() {
-        let expected: &[&str] = if index == 8 {
+        let expected: &[&str] = if index == 11 {
             &["merge"]
         } else {
             &["after_pr", "merge"]
@@ -204,20 +207,34 @@ fn assert_after_pr_contract(config: WorkflowConfig) {
         assert_eq!(actual, expected);
         assert_eq!(
             step.squash_merge,
-            if index == 8 { Some(true) } else { None }
+            if index == 11 { Some(true) } else { None }
         );
     }
     let wait = &compiled.after_pr["follow-up/wait-ci"];
     assert_eq!(wait.accepted_exit_codes.as_deref(), Some(&[0, 75][..]));
-    // Only a dispatched rerun returns to wait-ci; every refusal reaches repair.
+    // Only a dispatched rerun returns to wait-ci; every refusal reaches repair
+    // through the premise check, which routes an owed premise before the fix.
     let rerun = &compiled.after_pr["follow-up/rerun-unacquired-ci"];
     assert_eq!(rerun.next.as_deref(), Some("follow-up/wait-ci"));
     assert!(matches!(
         rerun.if_condition.as_ref().and_then(|condition| condition.fail.as_ref()),
-        Some(FailAction::Goto(target)) if target == "follow-up/fix-ci-error"
+        Some(FailAction::Goto(target)) if target == "follow-up/ci-premise-check"
     ));
     assert!(rerun.accepted_exit_codes.is_none());
+    let check = &compiled.after_pr["follow-up/ci-premise-check"];
+    assert_eq!(check.next.as_deref(), Some("follow-up/fix-ci-error"));
+    assert!(matches!(
+        check.if_condition.as_ref().and_then(|condition| condition.fail.as_ref()),
+        Some(FailAction::Goto(target)) if target == "follow-up/ci-premise"
+    ));
+    let premise = &compiled.after_pr["follow-up/ci-premise"];
+    assert_eq!(premise.output_file.as_deref(), Some("premise/ci.md"));
+    // An incomplete report or a changed workspace stops the run before any fix.
+    let record = &compiled.after_pr["follow-up/ci-premise-record"];
+    assert_eq!(record.accepted_exit_codes.as_deref(), Some(&[0][..]));
+    assert_eq!(record.next.as_deref(), Some("follow-up/fix-ci-error"));
     let fix = &compiled.after_pr["follow-up/fix-ci-error"];
+    assert!(fix.skip.is_none());
     assert_eq!(fix.next.as_deref(), Some("follow-up/finish-ci-fix"));
     assert_eq!(fix.output_file.as_deref(), Some("ci-followup/result.json"));
     let finish = &compiled.after_pr["follow-up/finish-ci-fix"];
@@ -247,7 +264,7 @@ fn assert_after_pr_contract(config: WorkflowConfig) {
     assert_eq!(enabled_ids(FlagValues::new()), [] as [&str; 0]);
     assert_eq!(
         enabled_ids([("after_pr".to_owned(), true)].into()),
-        AFTER_PR_IDS[..8]
+        AFTER_PR_IDS[..11]
     );
     assert_eq!(
         enabled_ids([("merge".to_owned(), true)].into()),
@@ -390,10 +407,16 @@ fn verify_builtin_repair_policy(project: &Path) {
             );
             assert_eq!(step.permission, Some(PermissionMode::Full));
             assert!(step.require_bubblewrap);
-            assert!(
-                matches!(&step.skip, Some(SkipCondition::Variable(name)) if name == "prev.success")
-            );
         }
+        // Conflict repair runs only after a failed sync; CI repair is reached only by jumps.
+        assert!(matches!(
+            &config.after_pr["follow-up/resolve-conflict"].skip,
+            Some(SkipCondition::Variable(name)) if name == "prev.success"
+        ));
+        let premise = &config.after_pr["follow-up/ci-premise"];
+        assert!(!premise.allow_commit);
+        assert_eq!(premise.permission, Some(PermissionMode::Full));
+        assert!(premise.require_bubblewrap);
         assert_eq!(
             config.after_pr["follow-up/fix-ci-error"]
                 .output_file
@@ -924,6 +947,13 @@ fn builtin_after_pr_fixture(
                 "follow-up/rerun-unacquired-ci" => rerun_command,
                 "follow-up/fix-ci-error" => repair_command.unwrap(),
                 "follow-up/finish-ci-fix" => finish_command,
+                // `owe-premise` in the project stands for two failed fixes on one check.
+                "follow-up/ci-premise-check" => {
+                    "mkdir -p premise; if [ -f owe-premise ]; then printf owed > premise/ci-owed.md; exit 1; fi; printf 'No premise is owed for this fix.\\n' > premise/ci.md"
+                }
+                "follow-up/ci-premise-record" => {
+                    "printf 'recorded\\n' >> premise-recorded; printf 'verdict: refuted\\n' > premise/ci.md"
+                }
                 _ => "true",
             };
             step.prompt = None;
@@ -1019,6 +1049,44 @@ async fn verify_builtin_after_pr_behavior(root: &Path) {
     verify_after_pr_hard_failure_after_prompt(root).await;
     verify_after_pr_no_commit_repair(root).await;
     verify_after_pr_runner_unacquired_rerun(root).await;
+    verify_after_pr_owed_premise_runs_before_repair(root).await;
+}
+
+#[cfg(unix)]
+async fn verify_after_pr_owed_premise_runs_before_repair(root: &Path) {
+    let owed = root.join("owed-premise");
+    std::fs::create_dir(&owed).unwrap();
+    init_after_pr_repo(&owed);
+    write(
+        &owed.join("ci-followup/evidence.md"),
+        "captured failure evidence",
+    );
+    write(&owed.join("owe-premise"), "");
+    let (result, _graph, started) = run_builtin_after_pr(
+        &owed,
+        "printf 'CI_FAILURE: unit-test job failed\\n' >&2; exit 75",
+        REFUSED_RERUN,
+        None,
+        "printf 'stop after one repair\\n' >&2; exit 1",
+    )
+    .await;
+    assert!(
+        matches!(result, Err(CruiseError::RequiredCommandFailed { ref step, .. }) if step == "follow-up/finish-ci-fix"),
+        "{result:?}"
+    );
+    let position = |name: &str| {
+        started
+            .iter()
+            .position(|step| step == name)
+            .unwrap_or_else(|| panic!("{name} did not run: {started:?}"))
+    };
+    assert!(position("follow-up/ci-premise-check") < position("follow-up/ci-premise"));
+    assert!(position("follow-up/ci-premise") < position("follow-up/ci-premise-record"));
+    assert!(position("follow-up/ci-premise-record") < position("follow-up/fix-ci-error"));
+    assert_eq!(
+        std::fs::read_to_string(owed.join("premise-recorded")).unwrap(),
+        "recorded\n"
+    );
 }
 
 #[cfg(unix)]
@@ -1075,6 +1143,10 @@ async fn verify_after_pr_hard_failure_after_prompt(root: &Path) {
     assert!(
         started.iter().any(|step| step == "follow-up/fix-ci-error"),
         "the CI repair prompt did not run: {started:?}"
+    );
+    assert!(
+        !started.iter().any(|step| step == "follow-up/ci-premise"),
+        "no premise is owed after the first failure: {started:?}"
     );
     assert!(
         started.iter().any(|step| step == "follow-up/finish-ci-fix"),

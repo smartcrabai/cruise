@@ -128,7 +128,7 @@ pub(crate) fn evidence(
             INVENTORY,
             &serde_json::to_string(&inventory).map_err(|error| json_error(&error))?,
         )?;
-        Ok(())
+        crate::premise::ci_observed(&artifacts_root, &failing_names(&inventory))
     })();
     if let Err(error) = result {
         write_unavailable(&artifacts_root, &error.to_string())?;
@@ -195,9 +195,25 @@ pub(crate) fn finish(
                         .into(),
                 ));
             }
-            commit_verified(&context, &inventory, verify)
+            commit_verified(&context, &inventory, verify)?;
+            crate::premise::ci_fix_committed(&artifacts_root, &failing_names(&inventory))
         }
     }
+}
+
+/// Names of failing checks a repair can target; jobs no runner acquired never ran.
+fn failing_names(inventory: &Inventory) -> BTreeSet<String> {
+    inventory
+        .checks
+        .iter()
+        .filter(|check| check.runner_unacquired.is_none())
+        .map(|check| check.name.clone())
+        .collect()
+}
+
+/// Failing check names in the current host CI inventory.
+pub(crate) fn failing_checks(root: &Path) -> Result<BTreeSet<String>> {
+    Ok(failing_names(&read_inventory(root)?))
 }
 
 fn write_check_summary(text: &mut String, check: &Check) -> Result<()> {
