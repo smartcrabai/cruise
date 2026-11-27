@@ -1678,7 +1678,7 @@ fn validate_call_argument_placement(name: &str, step: &StepConfig) -> crate::err
     Ok(())
 }
 
-/// Validate flag declarations and references from steps and after-pr steps.
+/// Validate flag declarations and references from steps, group steps, and after-pr steps.
 fn validate_flags(config: &WorkflowConfig) -> crate::error::Result<()> {
     use crate::error::CruiseError;
 
@@ -1694,7 +1694,12 @@ fn validate_flags(config: &WorkflowConfig) -> crate::error::Result<()> {
         }
     }
     let mut used = std::collections::HashSet::new();
-    for (step_name, step) in config.steps.iter().chain(&config.after_pr) {
+    for (step_name, step) in config
+        .steps
+        .iter()
+        .chain(&config.after_pr)
+        .chain(config.groups.values().flat_map(|group| &group.steps))
+    {
         if let Some(flag) = &step.flag {
             let names = flag.as_slice();
             if names.is_empty() {
@@ -2812,7 +2817,14 @@ fn validate_group_inner_steps(
                 "group '{group_name}' is empty (no steps defined)"
             )));
         }
+        let first = group.steps.keys().next();
+        let last = group.steps.keys().last();
         for (sub_name, sub_step) in &group.steps {
+            if sub_step.flag.is_some() && (Some(sub_name) == first || Some(sub_name) == last) {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "group step '{group_name}/{sub_name}' has a 'flag'; inner flags are allowed only on middle steps of a group whose call has no flag"
+                )));
+            }
             if sub_step.group.is_some() {
                 return Err(CruiseError::InvalidStepConfig(format!(
                     "nested group call inside group '{group_name}' at step '{sub_name}' is not allowed"
@@ -2822,11 +2834,6 @@ fn validate_group_inner_steps(
                 return Err(CruiseError::InvalidStepConfig(format!(
                     "group step '{group_name}/{sub_name}' has an individual 'if' condition, \
                      which is not allowed inside group steps"
-                )));
-            }
-            if sub_step.flag.is_some() {
-                return Err(CruiseError::InvalidStepConfig(format!(
-                    "group step '{group_name}/{sub_name}' has a 'flag', which is not allowed inside group steps; put the flag on the group call instead"
                 )));
             }
         }

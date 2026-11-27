@@ -1,8 +1,8 @@
 use crate::{
     app_config, backend, ci_followup, clean_cmd, cli, config_cmd, daemon, diff_cmd, docs_cmd,
-    draft_cmd, e2e_guard, error, exec_cmd, host_sync, i18n, ledger_snapshot, list_cmd, manager_cmd,
-    plan_cmd, platform, premise, provider_install, run_cmd, ssh_cmd, telemetry, tell_cmd,
-    tool_policy, update_cmd, usage_cmd, workflow_cmd, workflow_doctor, workflow_generate,
+    draft_cmd, e2e_guard, error, exec_cmd, host_sync, i18n, interrogate, ledger_snapshot, list_cmd,
+    manager_cmd, plan_cmd, platform, premise, provider_install, run_cmd, ssh_cmd, telemetry,
+    tell_cmd, tool_policy, update_cmd, usage_cmd, workflow_cmd, workflow_doctor, workflow_generate,
     workflow_make, worktree_pr,
 };
 
@@ -320,6 +320,22 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
         Some(cli::Commands::Internal(cli::InternalArgs {
             command: cli::InternalCommand::PremiseCiPassed,
         })) => premise::ci_passed(&path_from_env("CRUISE_AFTER_PR_PLAN")?),
+        Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::InterrogateBaseline,
+        })) => interrogate::baseline(
+            &std::env::current_dir()?,
+            &path_from_env("CRUISE_INTERROGATE_PLAN")?,
+        ),
+        Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::InterrogateFilter,
+        })) => {
+            let summary = interrogate::filter(
+                &std::env::current_dir()?,
+                &path_from_env("CRUISE_INTERROGATE_PLAN")?,
+            )?;
+            println!("{summary}");
+            Ok(())
+        }
         Some(cli::Commands::Internal(cli::InternalArgs {
             command: cli::InternalCommand::JcodePreTool,
         })) => unreachable!("jcode pre-tool gate exits before runtime initialization"),

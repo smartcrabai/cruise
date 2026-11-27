@@ -42,7 +42,7 @@ steps:
 
 Declare flags in top-level `flags:` and attach one to a step with `flag: <name>`. A flagged step runs only when its flag is `on` and is skipped when it is `off`.
 
-- **Targets:** a regular step, a group call site, a `workflow_call` call site (applied to every expanded step), a `parallel` parent, and steps under `after-pr`. Steps inside a group definition, a called workflow's own steps, and parallel children cannot use `flag:`.
+- **Targets:** a regular step, a group call site, a `workflow_call` call site (applied to every expanded step), a `parallel` parent, and steps under `after-pr`. Inside a group definition, only middle steps (not the first or last) of a group whose call site has no `flag:` may use `flag:`; a called workflow's own steps and parallel children cannot use it.
 - **Default off:** every declared flag is off when absent.
 - **Set values:** `--flag NAME` enables one flag; `--flag NAME1,NAME2` enables a comma-separated selection, and repeated `--flag` options are allowed. Explicit `NAME=on|off|true|false` assignments set or clear individual values. `cruise run` uses saved values plus CLI overrides without prompting. `cruise exec` and `force_exec` entry points prompt on a TTY when flags are declared and no `-f/--flag` is supplied, except on dry runs (see [Workflow flags](cli-reference.md#cruise-run)); unknown names are rejected.
 - **Resume:** saved session values are preserved; supplied `--flag` values override only the named flags.
@@ -269,7 +269,7 @@ steps:
 - A group call site cannot set `output_file` either; a dedicated error points you at the inner prompt step.
 - A group call site cannot set `computer_use`; set it on the inner prompt step instead.
 - A step inside a group definition cannot use `workflow_call:`; expand the called workflow at the top level instead.
-- A step inside a group definition cannot have a `flag:`; put the flag on the group call site instead.
+- Only a middle step of a group definition (not its first or last step) may have a `flag:`, and only when the group call site has none; otherwise put the flag on the group call site.
 
 <a id="workflow-composition-workflow_call"></a>
 ## Workflow Composition (`workflow_call`)

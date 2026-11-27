@@ -298,7 +298,7 @@ steps:
     flag: deploy        # skipped when deploy=off
 ```
 
-`flag:` gates use the compatible single-name string or a non-empty list with ANY/OR semantics. A gate is permitted on a step, group or `workflow_call` call site, or parallel parent; a call-site gate is applied to every expanded step. It is not permitted on parallel children, group definitions' steps, or a callee's own steps. See [flow-control.md](flow-control.md) and [steps.md](steps.md).
+`flag:` gates use the compatible single-name string or a non-empty list with ANY/OR semantics. A gate is permitted on a step, group or `workflow_call` call site, or parallel parent; a call-site gate is applied to every expanded step. It is not permitted on parallel children, the first or last step of a group definition (middle steps only, when the call site has no flag), or a callee's own steps. See [flow-control.md](flow-control.md) and [steps.md](steps.md).
 
 ## `languages`
 

@@ -225,6 +225,7 @@ Git 管理されていないディレクトリでは警告を出してその場�
 - `merge` は同じ after-PR 前処理に加えて、最後にネイティブの同期 squash merge を有効にします。GitHub では base から遅れている PR や競合している PR を、merge 前に自動で同期・復旧します。GitLab ではこの復旧は行いません。auto-merge を有効化せず、policy を回避せず、merge queue も使いません。
 - `formal_methods` は plan 承認後、`pre/*` や実装の前に Quint モデルだけを作成します。WebUI のセッション内パネル、または CLI で PNG を確認します。CLI は Kitty・iTerm2 の対応端末ではインラインに表示し、メニュー表示中に手動で開けるパスも出します。承認・却下（停止）・修正依頼（新版を確認）を選びます。[Quint のセットアップ](configuration.md#quint-workflow-review)。off の挙動は変わりません。
 - `advisor` は `builtin:tdd` の実装後に[読み取り専用のアドバイザー確認](sdk.md#advisor-steps)を一度だけ実行します（jcode 専用、既定はオフ）。通常の失敗時は `apply-advice` を飛ばし、成功時は `NO FINDINGS` の場合も通常モデルが助言を一度確認します。
+- `interrogate` は `builtin:tdd` のレビューループに再現の門を足します（既定はオフ）。consolidate の後、読み取り専用の `reproduce` step が REV/PLAN/WIRE の各 worklist 項目の `repro:` コマンドを実行し、ホストは再現できた項目（と SIMP/DOC の項目）だけを apply に渡します。再現しない項目は `not reproduced` として落とし、blocked の項目は編集せず `persists` のままにします。再現中にワークスペースが変わると実行を止めます。
 
 `research` は `create_pr: false` の read-only workflow です。`merge` は PR を作成せず、no-PR policy を上書きしません。PR が作成されないため opt-in の after-PR 処理を利用できない場合（`research`、`exec`、current-branch run、commit のない run など）、Cruise は理由を表示してその処理をスキップします。
 

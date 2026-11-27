@@ -502,6 +502,10 @@ pub enum InternalCommand {
     },
     /// Reset CI premise counts after every check passed.
     PremiseCiPassed,
+    /// Record the working tree before the TDD reproduce step (flag `interrogate`).
+    InterrogateBaseline,
+    /// Keep only reproduced behavioral worklist items (flag `interrogate`).
+    InterrogateFilter,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]

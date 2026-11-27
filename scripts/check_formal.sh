@@ -117,6 +117,9 @@ run_check formal-drift-simulation "$QUINT" run tests/formal/formal_drift.qnt --m
 run_check premise-gate-typecheck "$QUINT" typecheck tests/formal/premise_gate.qnt
 run_check premise-gate-test "$QUINT" test tests/formal/premise_gate.qnt --main premise_gate --backend typescript --seed 63
 run_check premise-gate-simulation "$QUINT" run tests/formal/premise_gate.qnt --main premise_gate --init init --step step --invariant safety --backend typescript --seed 63 --max-samples 1000 --max-steps 20
+run_check review-repro-gate-typecheck "$QUINT" typecheck tests/formal/review_repro_gate.qnt
+run_check review-repro-gate-test "$QUINT" test tests/formal/review_repro_gate.qnt --main review_repro_gate --backend typescript --seed 63
+run_check review-repro-gate-simulation "$QUINT" run tests/formal/review_repro_gate.qnt --main review_repro_gate --init init --step step --invariant safety --backend typescript --seed 63 --max-samples 1000 --max-steps 14
 run_check checkpoint-bdd cargo +1.99.1 test --locked --test graph_state --test checkpoint_bdd
 run_check ui-locale bash scripts/check_ui_locale_specs.sh
 run_check quality-gate-contracts cargo +1.99.1 test --locked --test quality_gate_graph --test quality_gate_cli --test quality_gate_config --test quality_gate_schema
