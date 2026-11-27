@@ -122,7 +122,7 @@ pub(crate) fn read_bytes(root: &Path, name: &str, max_size: usize) -> Result<Vec
 }
 
 pub(crate) fn ensure_private_directory(path: &Path) -> Result<()> {
-    let name = "image directory";
+    let name = "private artifact directory";
     ensure_directory_ancestors(path, name, write_error)?;
     let parent = path
         .parent()
@@ -202,37 +202,6 @@ pub fn remove(root: &Path, name: &str) -> Result<()> {
 
 fn remove_error(name: &str, error: &std::io::Error) -> CruiseError {
     CruiseError::Other(format!("failed to remove artifact '{name}': {error}"))
-}
-
-pub(crate) fn ensure_private_directory(path: &Path) -> Result<()> {
-    let name = "private artifact directory";
-    ensure_directory_ancestors(path, name, write_error)?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| write_error_message(name, "missing parent"))?;
-    ensure_directory_tree(parent, name)?;
-    let mut builder = fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt as _;
-        builder.mode(0o700);
-    }
-    if let Err(error) = builder.create(path)
-        && error.kind() != std::io::ErrorKind::AlreadyExists
-    {
-        return Err(write_error(name, &error));
-    }
-    ensure_write_directory(path, name)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        if fs::metadata(path)?.permissions().mode() & 0o077 != 0 {
-            return Err(write_error_message(name, "directory is not private"));
-        }
-    }
-    #[cfg(windows)]
-    crate::platform::set_owner_only_acl(path)?;
-    Ok(())
 }
 
 /// Atomically save an artifact, replacing an existing regular file only after
