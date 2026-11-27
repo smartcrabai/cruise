@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 use std::{
     fs,
-    io::{BufReader, Write},
+    io::{BufReader, Read, Write},
     os::unix::{
         fs::PermissionsExt,
         net::{UnixListener, UnixStream},
@@ -104,22 +104,45 @@ impl ManagerCli {
     }
 
     async fn finish(mut self) -> Output {
+        // Drain the pipes while waiting: a CLI that prints more than a pipe buffer would block.
+        let child = self.child();
+        let stdout = drain(child.stdout.take());
+        let stderr = drain(child.stderr.take());
         let deadline = Instant::now() + Duration::from_secs(10);
-        while self
-            .child()
-            .try_wait()
-            .unwrap_or_else(|error| panic!("poll manager CLI: {error}"))
-            .is_none()
-        {
+        let status = loop {
+            if let Some(status) = self
+                .child()
+                .try_wait()
+                .unwrap_or_else(|error| panic!("poll manager CLI: {error}"))
+            {
+                break status;
+            }
             assert!(Instant::now() < deadline, "manager CLI did not exit");
             tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        self.0 = None;
+        Output {
+            status,
+            stdout: join_drain(stdout),
+            stderr: join_drain(stderr),
         }
-        self.0
-            .take()
-            .unwrap_or_else(|| panic!("missing manager CLI child"))
-            .wait_with_output()
-            .unwrap_or_else(|error| panic!("read manager CLI output: {error}"))
     }
+}
+
+fn drain(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+    let mut pipe = pipe.unwrap_or_else(|| panic!("missing manager CLI pipe"));
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        pipe.read_to_end(&mut bytes)
+            .unwrap_or_else(|error| panic!("read manager CLI output: {error}"));
+        bytes
+    })
+}
+
+fn join_drain(handle: std::thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
+    handle
+        .join()
+        .unwrap_or_else(|_| panic!("manager CLI output reader panicked"))
 }
 
 impl Drop for ManagerCli {
