@@ -499,6 +499,11 @@ fn sdk_failure_reason(kind: &jcode_sdk::ErrorKind) -> &'static str {
         jcode_sdk::ErrorKind::InvalidOption => "sdk_invalid_option",
         jcode_sdk::ErrorKind::UnsupportedTransport => "sdk_unsupported_transport",
         jcode_sdk::ErrorKind::EventBufferOverflow => "sdk_event_buffer_overflow",
+        jcode_sdk::ErrorKind::Protocol => "sdk_protocol",
+        jcode_sdk::ErrorKind::Cancelled => "sdk_cancelled",
+        jcode_sdk::ErrorKind::CloudAuth => "sdk_cloud_auth",
+        jcode_sdk::ErrorKind::CloudNotEntitled => "sdk_cloud_not_entitled",
+        jcode_sdk::ErrorKind::HostKeyMismatch => "sdk_host_key_mismatch",
     }
 }
 
