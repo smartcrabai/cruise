@@ -228,8 +228,8 @@ The engine checks budget before incrementing counters, uses checked additions, s
 Run `bash scripts/check_exec_recovery_specs.sh` from the repository on macOS
 arm64 or Linux x86_64 with Node 26.13.1 and Rust 1.99.1 available. The production
 scenarios also need Bats with tag filtering, Expect, Git, curl and jq. The dedicated
-`.github/workflows/exec-recovery-specs.yml` installs Bats 1.10.0 and Expect
-5.45.4 on Ubuntu 24.04 and runs the same suite without provider credentials.
+`.github/workflows/exec-recovery-specs.yml` installs Bats 1.13.0 and Expect
+5.45.4 on Ubuntu 26.04 and runs the same suite without provider credentials.
 
 The Quint and Alloy models abstract one session, the live checkpoint, the
 first unresolved failure, and the prefix bookkeeping restored on retry.
